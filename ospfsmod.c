@@ -871,8 +871,9 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 		}
 
 		data = ospfs_block(blockno);
-		// Get to the right position in the block
-		//data += (*f_pos % OSPFS_BLKSIZE);
+		// Get to the right position in the block - is this right??
+		data += (*f_pos % OSPFS_BLKSIZE);
+		
 		// Figure out how much data is left in this block to read.
 		// Copy data into user space. Return -EFAULT if unable to write
 		// into user space.
@@ -885,7 +886,6 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 		if(n == 0)
 			goto done;
 
-		//return 0;
 		retval = copy_to_user(buffer, data, n);
 		
 		if(retval != 0) {
@@ -931,9 +931,11 @@ ospfs_write(struct file *filp, const char __user *buffer, size_t count, loff_t *
 	// use struct file's f_flags field and the O_APPEND bit.
 	/* EXERCISE: Your code here */
 
+
 	// If the user is writing past the end of the file, change the file's
 	// size to accomodate the request.  (Use change_size().)
 	/* EXERCISE: Your code here */
+
 
 	// Copy data block by block
 	while (amount < count && retval >= 0) {
@@ -947,14 +949,27 @@ ospfs_write(struct file *filp, const char __user *buffer, size_t count, loff_t *
 		}
 
 		data = ospfs_block(blockno);
-
+		// Get to the right position in the block - is this right?
+		data += (*f_pos % OSPFS_BLKSIZE);
+		
 		// Figure out how much data is left in this block to write.
 		// Copy data from user space. Return -EFAULT if unable to read
 		// read user space.
 		// Keep track of the number of bytes moved in 'n'.
 		/* EXERCISE: Your code here */
-		retval = -EIO; // Replace these lines
-		goto done;
+
+		// Go only to the end of a block, or the end of the read if before that
+		n = MIN(OSPFS_BLKSIZE - (*f_pos % OSPFS_BLKSIZE), (count - amount));
+
+		if(n == 0)
+			goto done;
+
+		retval = copy_from_user(data, buffer, n);
+		
+		if(retval != 0) {
+			retval = -EFAULT;
+			goto done;
+		}
 
 		buffer += n;
 		amount += n;
