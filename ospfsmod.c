@@ -15,6 +15,11 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 
+// Some useful macros...
+#ifndef MIN
+#define MIN(x, y) ((x < y) ? x : y)
+#endif
+
 /****************************************************************************
  * ospfsmod
  *
@@ -192,8 +197,9 @@ ospfs_inode_blockno(ospfs_inode_t *oi, uint32_t offset)
 	} else if (blockno >= OSPFS_NDIRECT) {
 		uint32_t *indirect_block = ospfs_block(oi->oi_indirect);
 		return indirect_block[blockno - OSPFS_NDIRECT];
-	} else
+	} else {
 		return oi->oi_direct[blockno];
+	}
 }
 
 
@@ -835,6 +841,7 @@ ospfs_notify_change(struct dentry *dentry, struct iattr *attr)
 //
 //   EXERCISE: Complete this function.
 
+int i = 0;
 static ssize_t
 ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 {
@@ -845,8 +852,11 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 	// Make sure we don't read past the end of the file!
 	// Change 'count' so we never read past the end of the file.
 	/* EXERCISE: Your code here */
-	if(oi->oi_size < amount)
-		count = oi->oi_size;
+	if(oi->oi_size <= *f_pos)
+		goto done;
+
+	if(oi->oi_size < *f_pos + count)
+		count = oi->oi_size - *f_pos;
 
 	// Copy the data to user block by block
 	while (amount < count && retval >= 0) {
@@ -861,28 +871,34 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 		}
 
 		data = ospfs_block(blockno);
+		// Get to the right position in the block
+		//data += (*f_pos % OSPFS_BLKSIZE);
 		// Figure out how much data is left in this block to read.
 		// Copy data into user space. Return -EFAULT if unable to write
 		// into user space.
 		// Use variable 'n' to track number of bytes moved.
 		/* EXERCISE: Your code here */
-		n = copy_to_user(buffer, data, count - amount);
-		eprintk("Stuff and things n: %d, count: %d, amount: %d, f_pos: %d\n", n, count, amount, (*f_pos));
-		if(n < 0) {
+		
+		// Go only to the end of a block, or the end of the read if before that
+		n = MIN(OSPFS_BLKSIZE - (*f_pos % OSPFS_BLKSIZE), (count - amount));
+
+		if(n == 0)
+			goto done;
+
+		//return 0;
+		retval = copy_to_user(buffer, data, n);
+		
+		if(retval != 0) {
 			retval = -EFAULT;
 			goto done;
 		}
-		/*if(n == 0) {
-			retval = 0;
-			goto done;
-		}*/
 
-		buffer += n;
 		amount += n;
+		buffer += n;
 		*f_pos += n;
 	}
 
-    done:
+	done:
 	return (retval >= 0 ? amount : retval);
 }
 
