@@ -562,31 +562,23 @@ allocate_block(void)
 	/* EXERCISE: Your code here */
 	int i;
 	uint32_t * bitvector = ospfs_block(2);
-	uint32_t blockno = // Start right after all the preallocated blocks
-		2 + (ospfs_super->os_nblocks / OSPFS_BLKBITSIZE) +
-			(ospfs_super->os_ninodes / OSPFS_BLKINODES);
-	bitvector += blockno / 32;
-
-	// Find a way to skip to the first of the actual file blocks
-	// Find the first bitvector with a free block
-	while(blockno < ospfs_super->os_nblocks
-			&& !(*bitvector)) {
-		bitvector++;
-		blockno += 32;
-	}
-
-	if(ospfs_super->os_nblocks < blockno) {
-		return 0; // We have failed to find a free block
-	}
-
-	for(i = 0; i < 32; i++) {
-		if(bitvector_test(bitvector, i)) {
-			bitvector_set(bitvector, i);
+	uint32_t blockno = 0;
+	while(blockno < ospfs_super->os_nblocks) {
+		if(bitvector_test(bitvector, blockno)) {
+			bitvector_clear(bitvector, blockno);
+			eprintk("Final Blockno: %d\n", blockno);
+			if(bitvector_test(bitvector, blockno))
+				eprintk("WHAT THE HECK???");
 			break;
 		}
 		blockno++;
 	}
+	if(ospfs_super->os_nblocks < blockno) {
+		eprintk("UH-OH\n");
+		return 0;
+	}
 
+	eprintk("Final Blockno: %d\n", blockno);
 	return blockno;
 }
 
@@ -605,6 +597,7 @@ allocate_block(void)
 static void
 free_block(uint32_t blockno)
 {
+	eprintk("FREEING BLOCK\n");
 	/* EXERCISE: Your code here */
 	uint32_t * bitvector = ospfs_block(2);
 	const uint32_t first_valid_block = 
@@ -629,68 +622,6 @@ free_block(uint32_t blockno)
  * way, then you may not need these functions.
  *
  */
-
-// The following functions are used in our code to unpack a block number into
-// its consituent pieces: the doubly indirect block number (if any), the
-// indirect block number (which might be one of many in the doubly indirect
-// block), and the direct block number (which might be one of many in an
-// indirect block).  We use these functions in our implementation of
-// change_size.
-
-
-// int32_t indir2_index(uint32_t b)
-//	Returns the doubly-indirect block index for file block b.
-//
-// Inputs:  b -- the zero-based index of the file block (e.g., 0 for the first
-//		 block, 1 for the second, etc.)
-// Returns: 0 if block index 'b' requires using the doubly indirect
-//	       block, -1 if it does not.
-//
-// EXERCISE: Fill in this function.
-
-static int32_t
-indir2_index(uint32_t b)
-{
-	// Your code here.
-	return -1;
-}
-
-
-// int32_t indir_index(uint32_t b)
-//	Returns the indirect block index for file block b.
-//
-// Inputs:  b -- the zero-based index of the file block
-// Returns: -1 if b is one of the file's direct blocks;
-//	    0 if b is located under the file's first indirect block;
-//	    otherwise, the offset of the relevant indirect block within
-//		the doubly indirect block.
-//
-// EXERCISE: Fill in this function.
-
-static int32_t
-indir_index(uint32_t b)
-{
-	// Your code here.
-	return -1;
-}
-
-
-// int32_t indir_index(uint32_t b)
-//	Returns the indirect block index for file block b.
-//
-// Inputs:  b -- the zero-based index of the file block
-// Returns: the index of block b in the relevant indirect block or the direct
-//	    block array.
-//
-// EXERCISE: Fill in this function.
-
-static int32_t
-direct_index(uint32_t b)
-{
-	// Your code here.
-	return -1;
-}
-
 
 // add_block(ospfs_inode_t *oi)
 //   Adds a single data block to a file, adding indirect and
@@ -742,6 +673,7 @@ add_block(ospfs_inode_t *oi)
 
 	// In direct block range
 	if(0 <= n && n < OSPFS_NDIRECT) {
+		eprintk("Things and Stuff\n");
 		oi->oi_direct[n] = allocate[0];
 	}
 	// Check if starting indirect block
@@ -756,9 +688,46 @@ add_block(ospfs_inode_t *oi)
 
 		// Set the first element of the indirect block
 		oi->oi_indirect = allocate[1];
-		block_list = ospfs_block(allocate[1]);
+		block_list = ospfs_block(oi->oi_indirect);
 		block_list[0] = allocate[0];
 	}
+	// Add to indirect block
+	else if(n < OSPFS_NDIRECT + OSPFS_NINDIRECT) {
+		eprintk("Stuff and things %d\n", n - OSPFS_NDIRECT);
+		// Add the to the end of the list
+		block_list = ospfs_block(oi->oi_indirect);
+		block_list[(n - OSPFS_NDIRECT)] = allocate[0];
+	}
+	// Check if we need to allocate the indirect2 block
+	else if(n == OSPFS_NDIRECT + OSPFS_NINDIRECT) {
+		// Allocate the indirect2 block
+		allocate[1] = allocate_block();
+		if(!allocate[1]) {
+			free_block(allocate[0]);
+			return -ENOSPC;
+		}
+
+		// Allocate the indirect block
+		allocate[2] = allocate_block();
+		if(!allocate[2]) {
+			free_block(allocate[0]);
+			free_block(allocate[1]);
+			return -ENOSPC;
+		}
+		
+		// Prepare the blocks
+		memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
+		memset(ospfs_block(allocate[2]), 0, OSPFS_BLKSIZE);
+
+		// Set the new indirect block and its first indirect and data block
+		oi->oi_indirect2 = allocate[0];
+		uint32_t * indirect_block_list = ospfs_block(oi->oi_indirect2);
+
+		indirect_block_list[0] = allocate[1];
+		uint32_t * block_list = ospfs_block(indirect_block_list[0]);
+		block_list[0] = allocate[2];
+	}
+	// Other things...
 	else {
 		eprintk("NOT READY YET!!\n");
 		free_block(allocate[0]);
@@ -766,6 +735,7 @@ add_block(ospfs_inode_t *oi)
 	}
 
 	/* EXERCISE: Your code here */
+	oi->oi_size = (n+1)*OSPFS_BLKSIZE;
 	return 0; // Replace this line
 }
 
@@ -846,12 +816,13 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 	int r = 0;
 
 	while (ospfs_size2nblocks(oi->oi_size) < ospfs_size2nblocks(new_size)) {
-	        /* EXERCISE: Your code here */
-		add_block(oi);
-		return -EIO; // Replace this line
+        /* EXERCISE: Your code here */
+		r = add_block(oi);
+		if(r < 0)
+			return r;
 	}
 	while (ospfs_size2nblocks(oi->oi_size) > ospfs_size2nblocks(new_size)) {
-	        /* EXERCISE: Your code here */
+        /* EXERCISE: Your code here */
 		return -EIO; // Replace this line
 	}
 
