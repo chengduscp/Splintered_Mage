@@ -554,12 +554,40 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 //
 //   You can use the functions bitvector_set(), bitvector_clear(), and
 //   bitvector_test() to do bit operations on the map.
-
+#define OSPFS_FIRST_VALID_BLOCK ospfs_super->os_firstinob + \
+ 								(ospfs_super->os_ninodes / OSPFS_BLKINODES);
 static uint32_t
 allocate_block(void)
 {
 	/* EXERCISE: Your code here */
-	return 0;
+	int i;
+	uint32_t * bitvector = ospfs_block(2);
+	uint32_t blockno = // Start right after all the preallocated blocks
+		2 + (ospfs_super->os_nblocks / OSPFS_BLKBITSIZE) +
+			(ospfs_super->os_ninodes / OSPFS_BLKINODES);
+	bitvector += blockno / 32;
+
+	// Find a way to skip to the first of the actual file blocks
+	// Find the first bitvector with a free block
+	while(blockno < ospfs_super->os_nblocks
+			&& !(*bitvector)) {
+		bitvector++;
+		blockno += 32;
+	}
+
+	if(ospfs_super->os_nblocks < blockno) {
+		return 0; // We have failed to find a free block
+	}
+
+	for(i = 0; i < 32; i++) {
+		if(bitvector_test(bitvector, i)) {
+			bitvector_set(bitvector, i);
+			break;
+		}
+		blockno++;
+	}
+
+	return blockno;
 }
 
 
@@ -578,6 +606,16 @@ static void
 free_block(uint32_t blockno)
 {
 	/* EXERCISE: Your code here */
+	uint32_t * bitvector = ospfs_block(2);
+	const uint32_t first_valid_block = 
+		2 + (ospfs_super->os_nblocks / OSPFS_BLKBITSIZE) +
+			(ospfs_super->os_ninodes / OSPFS_BLKINODES);
+	if(ospfs_super->os_nblocks < blockno ||
+		blockno < first_valid_block) { // Check for validity
+		return;
+	}
+
+	bitvector_clear(bitvector, blockno);
 }
 
 
@@ -688,14 +726,47 @@ direct_index(uint32_t b)
 static int
 add_block(ospfs_inode_t *oi)
 {
+	uint32_t * block_list;
 	// current number of blocks in file
 	uint32_t n = ospfs_size2nblocks(oi->oi_size);
 
 	// keep track of allocations to free in case of -ENOSPC
-	uint32_t *allocated[2] = { 0, 0 };
+	uint32_t *allocate[3] = { 0, 0, 0 };
+
+	// Allocate and prepare the data block
+	allocate[0] = allocate_block();
+	if(!allocate[0]) {
+		return -ENOSPC;
+	}
+	memset(ospfs_block(allocate[0]), 0, OSPFS_BLKSIZE);
+
+	// In direct block range
+	if(0 <= n && n < OSPFS_NDIRECT) {
+		oi->oi_direct[n] = allocate[0];
+	}
+	// Check if starting indirect block
+	else if(n == OSPFS_NDIRECT) {
+		// Allocate and prepare the indirect block
+		allocate[1] = allocate_block();
+		if(!allocate[1]) {
+			free_block(allocate[0]);
+			return -ENOSPC;
+		}
+		memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
+
+		// Set the first element of the indirect block
+		oi->oi_indirect = allocate[1];
+		block_list = ospfs_block(allocate[1]);
+		block_list[0] = allocate[0];
+	}
+	else {
+		eprintk("NOT READY YET!!\n");
+		free_block(allocate[0]);
+		return -EIO;
+	}
 
 	/* EXERCISE: Your code here */
-	return -EIO; // Replace this line
+	return 0; // Replace this line
 }
 
 
@@ -776,6 +847,7 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 
 	while (ospfs_size2nblocks(oi->oi_size) < ospfs_size2nblocks(new_size)) {
 	        /* EXERCISE: Your code here */
+		add_block(oi);
 		return -EIO; // Replace this line
 	}
 	while (ospfs_size2nblocks(oi->oi_size) > ospfs_size2nblocks(new_size)) {
@@ -785,7 +857,8 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 
 	/* EXERCISE: Make sure you update necessary file meta data
 	             and return the proper value. */
-	return -EIO; // Replace this line
+	oi->oi_size = new_size;
+	return 0;
 }
 
 
@@ -930,12 +1003,19 @@ ospfs_write(struct file *filp, const char __user *buffer, size_t count, loff_t *
 	// Support files opened with the O_APPEND flag.  To detect O_APPEND,
 	// use struct file's f_flags field and the O_APPEND bit.
 	/* EXERCISE: Your code here */
-
+	if(filp->f_flags & O_APPEND) {
+		*f_pos = oi->oi_size;
+	}
 
 	// If the user is writing past the end of the file, change the file's
 	// size to accomodate the request.  (Use change_size().)
 	/* EXERCISE: Your code here */
-
+	if(oi->oi_size < (*f_pos) + count) {
+		// We gotta do something about this one...
+		retval = change_size(oi, (*f_pos + count));
+		if(retval < 0)
+			return retval;
+	}
 
 	// Copy data block by block
 	while (amount < count && retval >= 0) {

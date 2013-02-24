@@ -591,12 +591,12 @@ allocate_block(void)
 	uint32_t * bitvector = ospfs_block(2);
 	uint32_t blockno = // Start right after all the preallocated blocks
 		2 + (ospfs_super->os_nblocks / OSPFS_BLKBITSIZE) +
-			ospfs_super->os_ninodes;
+			(ospfs_super->os_ninodes / OSPFS_BLKINODES);
 	bitvector += blockno / 32;
 
 	// Find a way to skip to the first of the actual file blocks
 	// Find the first bitvector with a free block
-	while(ospfs_super->os_nblocks < blockno 
+	while(blockno < ospfs_super->os_nblocks
 			&& !(*bitvector)) {
 		bitvector++;
 		blockno += 32;
