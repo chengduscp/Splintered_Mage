@@ -566,15 +566,11 @@ allocate_block(void)
 	while(blockno < ospfs_super->os_nblocks) {
 		if(bitvector_test(bitvector, blockno)) {
 			bitvector_clear(bitvector, blockno);
-			eprintk("Final Blockno: %d\n", blockno);
-			if(bitvector_test(bitvector, blockno))
-				eprintk("WHAT THE HECK???");
 			break;
 		}
 		blockno++;
 	}
 	if(ospfs_super->os_nblocks < blockno) {
-		eprintk("UH-OH\n");
 		return 0;
 	}
 
@@ -597,7 +593,6 @@ allocate_block(void)
 static void
 free_block(uint32_t blockno)
 {
-	eprintk("FREEING BLOCK\n");
 	/* EXERCISE: Your code here */
 	uint32_t * bitvector = ospfs_block(2);
 	const uint32_t first_valid_block = 
@@ -608,7 +603,7 @@ free_block(uint32_t blockno)
 		return;
 	}
 
-	bitvector_clear(bitvector, blockno);
+	bitvector_set(bitvector, blockno);
 }
 
 
@@ -657,7 +652,10 @@ free_block(uint32_t blockno)
 static int
 add_block(ospfs_inode_t *oi)
 {
+	// Indirect and Indirect2 lists
 	uint32_t * block_list;
+	uint32_t * indirect_block_list;
+	
 	// current number of blocks in file
 	uint32_t n = ospfs_size2nblocks(oi->oi_size);
 
@@ -673,7 +671,6 @@ add_block(ospfs_inode_t *oi)
 
 	// In direct block range
 	if(0 <= n && n < OSPFS_NDIRECT) {
-		eprintk("Things and Stuff\n");
 		oi->oi_direct[n] = allocate[0];
 	}
 	// Check if starting indirect block
@@ -693,7 +690,6 @@ add_block(ospfs_inode_t *oi)
 	}
 	// Add to indirect block
 	else if(n < OSPFS_NDIRECT + OSPFS_NINDIRECT) {
-		eprintk("Stuff and things %d\n", n - OSPFS_NDIRECT);
 		// Add the to the end of the list
 		block_list = ospfs_block(oi->oi_indirect);
 		block_list[(n - OSPFS_NDIRECT)] = allocate[0];
@@ -721,15 +717,43 @@ add_block(ospfs_inode_t *oi)
 
 		// Set the new indirect block and its first indirect and data block
 		oi->oi_indirect2 = allocate[0];
-		uint32_t * indirect_block_list = ospfs_block(oi->oi_indirect2);
+		indirect_block_list = ospfs_block(oi->oi_indirect2);
 
 		indirect_block_list[0] = allocate[1];
 		uint32_t * block_list = ospfs_block(indirect_block_list[0]);
 		block_list[0] = allocate[2];
 	}
-	// Other things...
+	// See if we are still in the allowed file size
+	else if(n < OSPFS_MAXFILEBLKS) {
+		int indirect_index, direct_index;
+		// Get the indirect2 list
+		indirect_block_list = ospfs_block(oi->oi_indirect2);
+		
+		// Check if we need to allocate a new indirect block
+		indirect_index = (n - OSPFS_NDIRECT - OSPFS_NINDIRECT) / OSPFS_NINDIRECT;
+		if(indirect_block_list[indirect_index] == 0) {
+			// Allocate the new indirect block and prepare it
+			allocate[1] = allocate_block();
+			if(!allocate[1]) {
+				free_block(allocate[0]);
+				return -ENOSPC;
+			}
+			memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
+
+			// Add the new indirect block to the list
+			indirect_block_list[indirect_index] = allocate[1];	
+		}
+
+		// Get the direct block list from the indirect block
+		block_list = ospfs_block(indirect_block_list[indirect_index]);
+
+		// Add the new data block
+		direct_index = (n - OSPFS_NDIRECT - OSPFS_NINDIRECT) % OSPFS_NINDIRECT;
+		block_list[direct_index] = allocate[0];
+	}
+	// No more blocks...
 	else {
-		eprintk("NOT READY YET!!\n");
+		eprintk("FILE FULL!!\n");
 		free_block(allocate[0]);
 		return -EIO;
 	}
@@ -765,11 +789,91 @@ add_block(ospfs_inode_t *oi)
 static int
 remove_block(ospfs_inode_t *oi)
 {
+	// Indirect and Indirect2 lists
+	uint32_t * block_list;
+	uint32_t * indirect_block_list;
+
 	// current number of blocks in file
 	uint32_t n = ospfs_size2nblocks(oi->oi_size);
 
+	// Check if the file has any allocated storage
+	if(n == 0)
+		return 0;
+
+	// Deallocate from the direct block range
+	if(0 < n && n < OSPFS_NDIRECT) {
+		free_block(oi->oi_direct[n - 1]);
+		oi->oi_direct[n - 1] = 0;
+	}
+	// Deallocate from the indirect block
+	else if(n < OSPFS_NDIRECT + OSPFS_NINDIRECT) {
+		// Check for the indirect block
+		if(oi->oi_indirect == 0)
+			return -EIO;
+
+		block_list = ospfs_block(oi->oi_indirect);
+		if(block_list[n - OSPFS_NDIRECT] == 0)
+			return -EIO;
+
+		// Free the data block
+		free_block(block_list[n - OSPFS_NDIRECT]);
+		block_list[n - OSPFS_NDIRECT] = 0;
+
+		// Check if we need to free the indirect block
+		if(n - OSPFS_NDIRECT == 0) {
+			free_block(oi->oi_indirect);
+			oi->oi_indirect = 0;
+		}
+
+	}
+	// Deallocate from the indirect2 block range
+	else if(n < OSPFS_MAXFILEBLKS) {
+		int indirect_index, direct_index;
+
+		// Make sure we have the indirect2 list
+		if(oi->oi_indirect2 == 0)
+			return -EIO;
+
+		// Get the indirect2 list
+		indirect_block_list = ospfs_block(oi->oi_indirect2);
+
+		// Check that we have the indirect block
+		indirect_index = (n - OSPFS_NDIRECT - OSPFS_NINDIRECT) / OSPFS_NINDIRECT;
+		if(indirect_block_list[indirect_index] == 0)
+			return -EIO;
+
+		// Get the indirect list
+		block_list = ospfs_block(indirect_block_list[indirect_index]);
+		// Check that we have the direct block
+		direct_index = (n - OSPFS_NDIRECT - OSPFS_NINDIRECT) % OSPFS_NINDIRECT;
+		if(block_list[direct_index] == 0)
+			return -EIO;
+
+		// Free the block(s)
+		free_block(block_list[direct_index]);
+		block_list[direct_index] = 0;
+
+		// Check if we need to free the indirect block
+		if(direct_index == 0) {
+			free_block(indirect_block_list[indirect_index]);
+			indirect_block_list[indirect_index] = 0;
+		}
+
+		// Now check if we need to free indirect2 block
+		if(direct_index == 0 && indirect_index == 0) {
+			free_block(oi->oi_indirect2);
+			oi->oi_indirect2 = 0;
+		}
+	}
+	// Don't know what is going on if we get here...
+	else {
+		eprintk("Unknown Status\n");
+		return -EIO;
+	}
+
 	/* EXERCISE: Your code here */
-	return -EIO; // Replace this line
+	oi->oi_size = (n-1)*OSPFS_BLKSIZE;
+	return 0; // Replace this line
 }
 
 
@@ -819,11 +923,16 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
         /* EXERCISE: Your code here */
 		r = add_block(oi);
 		if(r < 0)
-			return r;
+			break;
+	}
+	if(r != 0) {
+		new_size = old_size;
 	}
 	while (ospfs_size2nblocks(oi->oi_size) > ospfs_size2nblocks(new_size)) {
         /* EXERCISE: Your code here */
-		return -EIO; // Replace this line
+        r = remove_block(oi);
+		if(r < 0)
+			return r;
 	}
 
 	/* EXERCISE: Make sure you update necessary file meta data
