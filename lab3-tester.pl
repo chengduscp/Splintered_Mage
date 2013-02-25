@@ -7,51 +7,128 @@ close FOO;
 
 @tests = (
     # test reading
+    # 1
     [ 'diff base/hello.txt test/hello.txt >/dev/null 2>&1 && echo $?',
       "0"
     ],
     
+    # 2
     [ 'cmp base/pokercats.gif test/pokercats.gif >/dev/null 2>&1 && echo $?',
       "0"
     ],
-        
+    
+    # 3 
     [ 'ls -l test/pokercats.gif | awk "{ print \$5 }"',
       "91308"
+    ],
+
+    # 4
+    # read first byte of a file
+    [ 'dd bs=1 if=test/pokercats.gif > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 5
+    # read first block of a file
+    [ 'dd bs=1024 if=test/pokercats.gif > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 6
+    # read half of first block of a file
+    [ 'dd bs=512 if=test/pokercats.gif > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 7
+    # read partway through first block and part way through second
+    [ 'dd bs=1024 seek=624 if=test/pokercats.gif > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 8
+    # try to read past the end of the file
+    [ 'dd bs=10 skip=512 if=test/hello.txt > /dev/null 2>&1 && echo $?',
+      "0"
     ],
 
     # test writing
     # We use dd to write because it doesn't initially truncate, and it can
     # be told to seek forward to a particular point in the disk.
+    # 9
     [ "echo Bybye | dd bs=1 count=5 of=test/hello.txt conv=notrunc >/dev/null 2>&1 ; cat test/hello.txt",
       "Bybye, world!"
     ],
     
+    # 10
     [ "echo Hello | dd bs=1 count=5 of=test/hello.txt conv=notrunc >/dev/null 2>&1 ; cat test/hello.txt",
       "Hello, world!"
     ],
     
+    # 11
     [ "echo gi | dd bs=1 count=2 seek=7 of=test/hello.txt conv=notrunc >/dev/null 2>&1 ; cat test/hello.txt",
       "Hello, girld!"
     ],
     
+    # 12
     [ "echo worlds galore | dd bs=1 count=13 seek=7 of=test/hello.txt conv=notrunc >/dev/null 2>&1 ; cat test/hello.txt",
       "Hello, worlds galore"
     ],
     
+    # 13
     [ "echo 'Hello, world!' > test/hello.txt ; cat test/hello.txt",
       "Hello, world!"
     ],
+
+    # 14
+    # overwrite first two blocks of the file
+    [ 'cat test/direct.txt | dd bs=1024 count=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 15
+    # overwrite the second block of the file, not the first
+    [ 'cat test/direct.txt | dd bs=1024 count=1 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 16
+    # odd sized writing block
+    [ 'cat test/direct.txt | dd bs=1536 count=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 17
+    # overwrite the middle of the first block of the file
+    [ 'cat test/direct.txt | dd bs=256 count=4 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 18
+    # overwrite the second half of the first block of a file
+    [ 'cat test/direct.txt | dd bs=512 count=2 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
     
+    # 19
+    # overwrite the second half of the first block and the first half of the second block of a file
+    [ 'cat test/direct.txt | dd bs=512 count=2 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
+      "0"
+    ],
+
+    # 20
     # create a file
     [ 'touch test/file1 && echo $?',
       "0"
     ],
 
+    # 21
     # read directory
     [ 'touch test/dir-contents.txt ; ls test | tee test/dir-contents.txt | grep file1',
       'file1'
     ],
 
+    # 22
     # write files, remove them, then read dir again
     [ 'ls test | dd bs=1 of=test/dir-contents.txt >/dev/null 2>&1; ' .
       ' touch test/foo test/bar test/baz && '.
@@ -60,32 +137,37 @@ close FOO;
       ''
     ],
 
+    # 23
     # remove the last file
     [ 'rm -f test/dir-contents.txt && ls test | grep dir-contents.txt',
       ''
     ],
 
-
+    # 24
     # write to a file
     [ 'echo hello > test/file1 && cat test/file1',
       'hello'
     ],
     
+    # 25
     # append to a file
     [ 'echo hello > test/file1 ; echo goodbye >> test/file1 && cat test/file1',
       'hello goodbye'
     ],
 
+    # 26
     # delete a file
     [ 'rm -f test/file1 && ls test | grep file1',
       ''
     ],
 
+    # 27
     # make a larger file for indirect blocks
     [ 'yes | head -n 5632 > test/yes.txt && ls -l test/yes.txt | awk \'{ print $5 }\'',
       '11264'
     ],
-   
+
+    # 28
     # truncate the large file
     [ 'echo truncernated11 > test/yes.txt | ls -l test/yes.txt | awk \'{ print $5 }\' ; rm test/yes.txt',
       '15'
