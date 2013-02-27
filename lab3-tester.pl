@@ -76,45 +76,47 @@ close FOO;
     ],
     
     # 13
+    # overwrite the part of the first block and part of the second block of a file
+    [ 'cat test/direct.txt | dd bs=653 count=2 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 &&' .
+     ' diff test/indirect.txt ./indirect.txt',
+      ""
+    ],
+
+    # 14
     [ "echo 'Hello, world!' > test/hello.txt ; cat test/hello.txt",
       "Hello, world!"
     ],
 
-    # 14
+    # 15
     # overwrite first two blocks of the file
     [ 'cat test/direct.txt | dd bs=1024 count=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
       "0"
     ],
 
-    # 15
+    # 16
     # overwrite the second block of the file, not the first
     [ 'cat test/direct.txt | dd bs=1024 count=1 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
       "0"
     ],
 
-    # 16
+    # 17
     # odd sized writing block
     [ 'cat test/direct.txt | dd bs=1536 count=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
       "0"
     ],
 
-    # 17
+    # 18
     # overwrite the middle of the first block of the file
     [ 'cat test/direct.txt | dd bs=256 count=4 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
       "0"
     ],
 
-    # 18
+    # 19
     # overwrite the second half of the first block of a file
     [ 'cat test/direct.txt | dd bs=512 count=2 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
       "0"
     ],
     
-    # 19
-    # overwrite the second half of the first block and the first half of the second block of a file
-    [ 'cat test/direct.txt | dd bs=512 count=2 seek=1 of=test/indirect.txt conv=notrunc > /dev/null 2>&1 && echo $?',
-      "0"
-    ],
 
     # 20
     # create a file
@@ -173,6 +175,24 @@ close FOO;
       '15'
     ],
 
+    # 29
+    # hard link a file
+    [ 'ln test/overwrite.txt test/hardlink && diff test/overwrite.txt test/hardlink',
+      ''
+    ],
+
+    # 30
+    # delete a hard link from a file
+    
+
+    # 31
+    # soft link creation
+    [ 'ln -s test/overwrite.txt test/softlink && ls -l test/softlink | awk \'{ print $11 }\'',
+      'test/overwrite.txt'
+    ],
+    
+    # 32
+    # remove a symbolic link
 );
 
 my($ntest) = 0;

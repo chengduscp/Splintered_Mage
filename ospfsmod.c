@@ -558,8 +558,16 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 		return -ENOENT;
 	}
 
+
 	od->od_ino = 0;
 	oi->oi_nlink--;
+
+	// Check if we can free the blocks
+	if(oi->oi_nlink == 0)
+		change_size(oi, 0);
+
+	// Check for symlinks
+
 	return 0;
 }
 
@@ -950,18 +958,20 @@ static int
 change_size(ospfs_inode_t *oi, uint32_t new_size)
 {
 	uint32_t old_size = oi->oi_size;
-	int r = 0;
+	int r = 0, retval = 0;
 
 	while (ospfs_size2nblocks(oi->oi_size) < ospfs_size2nblocks(new_size)) {
         /* EXERCISE: Your code here */
 		r = add_block(oi);
 		if(r < 0) {
 			eprintk("STUFF AND THINGS\n");
+			retval = r;
 			break;
 		}
 	}
 	if(r != 0) {
 		eprintk("STUFF AND THINGS 2\n");
+		retval = r;
 		new_size = old_size;
 	}
 	while (ospfs_size2nblocks(oi->oi_size) > ospfs_size2nblocks(new_size)) {
@@ -975,7 +985,7 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 	/* EXERCISE: Make sure you update necessary file meta data
 	             and return the proper value. */
 	oi->oi_size = new_size;
-	return 0;
+	return retval;
 }
 
 
@@ -1413,13 +1423,6 @@ ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidat
 	inodes[entry_ino].oi_ftype = OSPFS_FTYPE_REG;
 	inodes[entry_ino].oi_mode = mode;
 
-	// Set all the blocks as free
-	change_size(&inodes[entry_ino], 0);
-	for(i = 0; i < OSPFS_NDIRECT; i++)
-		inodes[entry_ino].oi_direct[i] = 0;
-	inodes[entry_ino].oi_indirect = 0;
-	inodes[entry_ino].oi_indirect2 = 0;
-
 	// Set up dentry
 	direntry->od_ino = entry_ino;
 	// Create the name and null byte padding
@@ -1468,11 +1471,74 @@ ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidat
 static int
 ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 {
+	int len, i;
 	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
+	ospfs_symlink_inode_t *symlink = 0;
+	ospfs_inode_t *inodes = ospfs_block(ospfs_super->os_firstinob);
+	ospfs_direntry_t *direntry = 0;
 	uint32_t entry_ino = 0;
 
-	/* EXERCISE: Your code here. */
-	return -EINVAL;
+	if(OSPFS_MAXNAMELEN < dentry->d_name.len) {
+		return -ENAMETOOLONG;
+	}
+
+	if(find_direntry(dir_oi, dentry->d_name.name, 
+			dentry->d_name.len)) {
+		return -EEXIST;
+	}
+
+	// Now check the symbolic link name
+	len = strlen(symname);
+	if(OSPFS_MAXSYMLINKLEN < len) {
+		return -ENAMETOOLONG;
+	}
+
+	// Get a new direntry
+	direntry = create_blank_direntry(dir_oi);
+	if(IS_ERR(direntry))
+		return PTR_ERR(direntry);
+
+	// Find an open inode
+	for(i = 0; i < ospfs_super->os_ninodes; i++) {
+		if(inodes[i].oi_nlink == 0) {
+			entry_ino = i;
+			break;
+		}
+	}
+	if(i == ospfs_super->os_ninodes)
+		return -ENOSPC;
+
+	// Set the symlink to the appropriate inode
+	symlink = (ospfs_symlink_inode_t*)&inodes[entry_ino];
+
+
+	// Set the values of the members
+	symlink->oi_nlink = 1;
+	symlink->oi_ftype = OSPFS_FTYPE_SYMLINK;
+	symlink->oi_size = len;
+	strcpy(symlink->oi_symlink, symname);
+
+	// Make root?ln1:ln2<null> into root?ln1<null>ln2<null>
+	// This is to make conditional symlinks easier later
+	if(strncmp (symlink->oi_symlink, "root?", 5) == 0) {
+		i = 0;
+		// Find the dividing point
+		while(i < len && symlink->oi_symlink[i] != ':') {
+			i++;
+		}
+		// This should never happen
+		if(i == len)
+			return -ENAMETOOLONG;
+
+		// Divide the two with a null byte
+		symlink->oi_symlink[i] = '\0';
+	}
+
+	// Finish making the direntry
+	direntry->od_ino = entry_ino;
+	strncpy(direntry->od_name, dentry->d_name.name, dentry->d_name.len);
+	direntry->od_name[dentry->d_name.len] = '\0';
+	eprintk("Stuff and things %s and %s and %d\n", direntry->od_name, symlink->oi_symlink, symlink->oi_ftype);
 
 	/* Execute this code after your function has successfully created the
 	   file.  Set entry_ino to the created file's inode number before
@@ -1506,6 +1572,8 @@ ospfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 	ospfs_symlink_inode_t *oi =
 		(ospfs_symlink_inode_t *) ospfs_inode(dentry->d_inode->i_ino);
 	// Exercise: Your code here.
+
+	eprintk("Stuff and things %s and %d and %d and %d\n", oi->oi_symlink, oi->oi_ftype, oi->oi_size, oi->oi_nlink);
 
 	nd_set_link(nd, oi->oi_symlink);
 	return (void *) 0;
