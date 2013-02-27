@@ -1320,6 +1320,7 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 	/* EXERCISE: Your code here. */
 	int i;
 	ospfs_direntry_t *direntry;
+	ospfs_inode_t *link_inode;
 	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
 	if(src_dentry->d_inode->i_ino == 0) {
 		return -EIO;
@@ -1340,17 +1341,15 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 		return PTR_ERR(direntry);
 	}
 
-	dst_dentry->d_inode->i_ino = src_dentry->d_inode->i_ino;
-	direntry->od_ino = dst_dentry->d_inode->i_ino;
+	//dst_dentry->d_inode->i_ino = src_dentry->d_inode->i_ino;
+	direntry->od_ino = src_dentry->d_inode->i_ino;
 	// Create the name and null byte padding
-	for(i = 0; i < OSPFS_MAXNAMELEN + 1; i++) {
-		if(i < dst_dentry->d_name.len)
-			direntry->od_name[i] = dst_dentry->d_name.name[i];
-		else
-			direntry->od_name[i] = '\0';
-	}
+	strncpy(direntry->od_name, dst_dentry->d_name.name, dst_dentry->d_name.len);
 
-	return -EINVAL;
+	link_inode = ospfs_inode(direntry->od_ino);
+	link_inode->oi_nlink++;
+
+	return 0;
 }
 
 // ospfs_create
