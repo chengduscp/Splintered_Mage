@@ -187,7 +187,7 @@ close FOO;
 
     # 31
     # soft link creation
-    [ 'ln -s test/overwrite.txt test/softlink && ls -l test/softlink | awk \'{ print $11 }\'',
+    [ 'ln -s test/overwrite.txt test/softlink && ls -l test/softlink | awk \'{ print $10 }\'',
       'test/overwrite.txt'
     ],
     

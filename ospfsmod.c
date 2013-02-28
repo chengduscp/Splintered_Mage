@@ -562,11 +562,18 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 	od->od_ino = 0;
 	oi->oi_nlink--;
 
-	// Check if we can free the blocks
-	if(oi->oi_nlink == 0)
-		change_size(oi, 0);
-
 	// Check for symlinks
+	if(oi->oi_ftype == OSPFS_FTYPE_SYMLINK) {
+		memset(oi, 0, sizeof(ospfs_symlink_inode_t));
+		return 0;
+	}
+
+	// Check if we can free the blocks
+	if(oi->oi_nlink == 0) {
+
+		change_size(oi, 0);
+	}
+
 
 	return 0;
 }
@@ -601,7 +608,6 @@ static uint32_t
 allocate_block(void)
 {
 	/* EXERCISE: Your code here */
-	int i;
 	uint32_t * bitvector = ospfs_block(2);
 	uint32_t blockno = OSPFS_FIRST_VALID_BLOCK;
 	while(blockno < ospfs_super->os_nblocks) {
@@ -611,7 +617,7 @@ allocate_block(void)
 		}
 		blockno++;
 	}
-	if(ospfs_super->os_nblocks < blockno) {
+	if(ospfs_super->os_nblocks == blockno) {
 		return 0;
 	}
 
@@ -696,7 +702,7 @@ add_block(ospfs_inode_t *oi)
 	uint32_t n = ospfs_size2nblocks(oi->oi_size);
 
 	// keep track of allocations to free in case of -ENOSPC
-	uint32_t *allocate[3] = { 0, 0, 0 };
+	uint32_t allocate[3] = { 0, 0, 0 };
 
 	// Allocate and prepare the data block
 	allocate[0] = allocate_block();
@@ -836,12 +842,12 @@ remove_block(ospfs_inode_t *oi)
 		return 0;
 
 	// Deallocate from the direct block range
-	if(0 < n && n < OSPFS_NDIRECT) {
+	if(0 < n && n <= OSPFS_NDIRECT) {
 		free_block(oi->oi_direct[n - 1]);
 		oi->oi_direct[n - 1] = 0;
 	}
 	// Deallocate from the indirect block
-	else if(n < OSPFS_NDIRECT + OSPFS_NINDIRECT) {
+	else if(n <= OSPFS_NDIRECT + OSPFS_NINDIRECT) {
 		// Check for the indirect block
 		if(oi->oi_indirect == 0) {
 			return -EIO;
@@ -864,7 +870,7 @@ remove_block(ospfs_inode_t *oi)
 
 	}
 	// Deallocate from the indirect2 block range
-	else if(n < OSPFS_MAXFILEBLKS) {
+	else if(n <= OSPFS_MAXFILEBLKS) {
 		int blockoff, indirect_index, direct_index;
 
 		// Make sure we have the indirect2 list
@@ -960,18 +966,19 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 	uint32_t old_size = oi->oi_size;
 	int r = 0, retval = 0;
 
+	// Simple check to make sure we don't try to go over the file size limit
+	if(OSPFS_MAXFILESIZE < new_size)
+		return -ENOSPC;
+
 	while (ospfs_size2nblocks(oi->oi_size) < ospfs_size2nblocks(new_size)) {
         /* EXERCISE: Your code here */
 		r = add_block(oi);
 		if(r < 0) {
-			eprintk("STUFF AND THINGS\n");
 			retval = r;
 			break;
 		}
 	}
 	if(r != 0) {
-		eprintk("STUFF AND THINGS 2\n");
-		retval = r;
 		new_size = old_size;
 	}
 	while (ospfs_size2nblocks(oi->oi_size) > ospfs_size2nblocks(new_size)) {
@@ -1140,8 +1147,9 @@ ospfs_write(struct file *filp, const char __user *buffer, size_t count, loff_t *
 	if(oi->oi_size < (*f_pos) + count) {
 		// We gotta do something about this one...
 		retval = change_size(oi, (*f_pos + count));
-		if(retval < 0)
+		if(retval < 0) {
 			return retval;
+		}
 	}
 
 	// Copy data block by block
@@ -1328,7 +1336,6 @@ create_blank_direntry(ospfs_inode_t *dir_oi)
 static int
 ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dentry) {
 	/* EXERCISE: Your code here. */
-	int i;
 	ospfs_direntry_t *direntry;
 	ospfs_inode_t *link_inode;
 	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
@@ -1538,7 +1545,6 @@ ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 	direntry->od_ino = entry_ino;
 	strncpy(direntry->od_name, dentry->d_name.name, dentry->d_name.len);
 	direntry->od_name[dentry->d_name.len] = '\0';
-	eprintk("Stuff and things %s and %s and %d\n", direntry->od_name, symlink->oi_symlink, symlink->oi_ftype);
 
 	/* Execute this code after your function has successfully created the
 	   file.  Set entry_ino to the created file's inode number before
@@ -1573,9 +1579,24 @@ ospfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 		(ospfs_symlink_inode_t *) ospfs_inode(dentry->d_inode->i_ino);
 	// Exercise: Your code here.
 
-	eprintk("Stuff and things %s and %d and %d and %d\n", oi->oi_symlink, oi->oi_ftype, oi->oi_size, oi->oi_nlink);
+	char* symlink = oi->oi_symlink;
+	// Check for conditional
+	if(strncmp (oi->oi_symlink, "root?", 5) == 0) {
+		// If we are root go to the character right after '?'
+		if(current->euid == 0) { 
+			symlink = &symlink[5];
+		}
+		// Otherwise find the start of the next work
+		else {
+			symlink = &symlink[5];
+			while(*symlink) {
+				symlink++;
+			}
+			symlink++;
+		}
+	}
 
-	nd_set_link(nd, oi->oi_symlink);
+	nd_set_link(nd, symlink);
 	return (void *) 0;
 }
 
