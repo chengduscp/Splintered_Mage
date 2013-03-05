@@ -724,22 +724,20 @@ add_block(ospfs_inode_t *oi)
 {
 	uint32_t * block_list;
 	uint32_t * indirect_block_list;
-
+	int indirect2_index, indirect_index, direct_index;
 	// current number of blocks in file
 	uint32_t n = ospfs_size2nblocks(oi->oi_size);
-
-	// Indexes of the direct, indirect, and indirect2 blocks
-	int indirect2_index = block_indirect2_index(n);
-	int indirect_index = block_indirect_index(n);
-	int direct_index = block_direct_index(n);
-
-	eprintk("Three indicies: %d %d %d\n", indirect2_index, indirect_index, direct_index);
 
 	// keep track of allocations to free in case of -ENOSPC
 	int allocate[3] = { 0, 0, 0 };
 	// TODO: Implement auxilary function to get location of next free block after given index
 	// TODO: After that, make it so that it allocates all at once
 	// uint32_t *pointers[3] = { 0, 0, 0 };
+
+	// Indexes of the direct, indirect, and indirect2 blocks
+	indirect2_index = block_indirect2_index(n);
+	indirect_index = block_indirect_index(n);
+	direct_index = block_direct_index(n);
 
 	// Allocate and prepare the data block
 	allocate[0] = allocate_block();
@@ -769,6 +767,7 @@ add_block(ospfs_inode_t *oi)
 		block_list = ospfs_block(oi->oi_indirect);
 		// Allocate the data block
 		block_list[direct_index] = allocate[0];
+		eprintk("Allocating for indirect %d: %d\n", direct_index, block_list[direct_index]);
 	}
 	else { // indirect2 block range
 		// Check if we need to allocate the indirect2 block
@@ -793,6 +792,7 @@ add_block(ospfs_inode_t *oi)
 			if(!allocate[1]) {
 				free_block(allocate[0]);
 				if(allocate[2]) { // Check if we allocated the indirect2 block
+					oi->oi_indirect2 = 0;
 					free_block(allocate[2]);
 				}
 				return -ENOSPC;
@@ -840,6 +840,8 @@ add_block(ospfs_inode_t *oi)
 static int
 remove_block(ospfs_inode_t *oi)
 {
+	// Number of blocks freed and i
+	int n_blocks_freed, i;
 	// Indirect and Indirect2 lists
 	uint32_t * block_list;
 	uint32_t * indirect_block_list;
@@ -852,46 +854,60 @@ remove_block(ospfs_inode_t *oi)
 	// Indexes of the direct, indirect, and indirect2 blocks
 	int indirect2_index = block_indirect2_index(n);
 	int indirect_index = block_indirect_index(n);
-	int direct_index = block_direct_index(n);
+	int direct_index = block_direct_index(n) - 1; // -1 because we're free the last block
 
 	// List of blocks to free
-/*
 	uint32_t free_list[3] = { 0, 0, 0 };
 	uint32_t *zero_list[3] = { 0, 0, 0 };
 	eprintk("Three indicies: %d %d %d\n", indirect2_index, indirect_index, direct_index);
-	int i = 0; // used as how many we've done
+	n_blocks_freed = 0; // used as how many we've done
+/*
 */
 
-
 	if(indirect2_index < 0 && indirect_index < 0) { // direct block range
-		free_block(oi->oi_direct[direct_index]);
-		oi->oi_direct[direct_index] = 0;
+		free_list[n_blocks_freed] = oi->oi_direct[direct_index];
+		zero_list[n_blocks_freed] = &oi->oi_direct[direct_index];
+		n_blocks_freed++;
 	}
 	else if(indirect2_index < 0) { // indirect block range
 		block_list = ospfs_block(oi->oi_indirect);
-		free_block(block_list[direct_index]);
-		block_list[direct_index] = 0;
+		free_list[n_blocks_freed] = block_list[direct_index];
+		zero_list[n_blocks_freed] = &block_list[direct_index];
+		n_blocks_freed++;
+
+		for (i = 0; i < n_blocks_freed; i++) {
+			eprintk("Freed 2block %d\n", free_list[i]);
+		}
 
 		// Check if we can free the indirect block
 		if(direct_index == 0) {
-			free_block(oi->oi_indirect);
-			oi->oi_indirect = 0;
+			free_list[n_blocks_freed] = oi->oi_indirect;
+			zero_list[n_blocks_freed] = &oi->oi_indirect;
+			n_blocks_freed++;
 		}
 	}
 	else { // indirect2 block range
 		indirect_block_list = ospfs_block(oi->oi_indirect2);
 		block_list = ospfs_block(indirect_block_list[indirect_index]);
-		free_block(block_list[direct_index]);
-		block_list[direct_index] = 0;
+		free_list[n_blocks_freed] = block_list[direct_index];
+		zero_list[n_blocks_freed] = &block_list[direct_index];
+		n_blocks_freed++;
 
 		if(direct_index == 0) {
-			free_block(indirect_block_list[direct_index]);
-			indirect_block_list[direct_index] = 0;
+			free_list[n_blocks_freed] = indirect_block_list[direct_index];
+			zero_list[n_blocks_freed] = &indirect_block_list[direct_index];
+			n_blocks_freed++;
 		}
 		if(indirect_index == 0) {
-			free_block(oi->oi_indirect2);
-			oi->oi_indirect2 = 0;
+			free_list[n_blocks_freed] = oi->oi_indirect2;
+			zero_list[n_blocks_freed] = &oi->oi_indirect2;
+			n_blocks_freed++;
 		}
+	}
+	for (i = 0; i < n_blocks_freed; i++) {
+		free_block(free_list[i]);
+		*(zero_list[i]) = 0;
+		eprintk("Freed block %d\n", free_list[i]);
 	}
 
 	/* EXERCISE: Your code here */
