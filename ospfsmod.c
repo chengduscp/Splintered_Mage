@@ -660,6 +660,34 @@ free_block(uint32_t blockno)
  *
  */
 
+// Returns -1 if not in indirect2 block range, 0 if it is
+int block_indirect2_index(uint32_t blockno) {
+	return ((blockno < OSPFS_NDIRECT + OSPFS_NINDIRECT) ? -1 : 0);
+}
+// Returns -1 if not in indirect or direct block range, or the index >= 0 of
+// blockno if it is
+int block_indirect_index(uint32_t blockno) {
+	// Check if in direct block range
+	if(blockno < OSPFS_NDIRECT)
+		return -1;
+	blockno -= OSPFS_NDIRECT;
+
+	// Check if in the indirect block range
+	if(blockno < OSPFS_NINDIRECT)
+		return 0;
+	blockno -= OSPFS_NINDIRECT;
+
+	// Now in the indirect2 block range
+	return blockno / OSPFS_NINDIRECT;
+}
+// Returns the direct block index of blockno
+int block_direct_index(uint32_t blockno) {
+	if(blockno < OSPFS_NDIRECT)
+		return blockno;
+	blockno -= OSPFS_NDIRECT;
+	return blockno % OSPFS_NINDIRECT;
+}
+
 // add_block(ospfs_inode_t *oi)
 //   Adds a single data block to a file, adding indirect and
 //   doubly-indirect blocks if necessary. (Helper function for
@@ -836,86 +864,54 @@ remove_block(ospfs_inode_t *oi)
 
 	// current number of blocks in file
 	uint32_t n = ospfs_size2nblocks(oi->oi_size);
-
-	// Check if the file has any allocated storage
 	if(n == 0)
 		return 0;
 
-	// Deallocate from the direct block range
-	if(0 < n && n <= OSPFS_NDIRECT) {
-		free_block(oi->oi_direct[n - 1]);
-		oi->oi_direct[n - 1] = 0;
-	}
-	// Deallocate from the indirect block
-	else if(n <= OSPFS_NDIRECT + OSPFS_NINDIRECT) {
-		// Check for the indirect block
-		if(oi->oi_indirect == 0) {
-			return -EIO;
-		}
+	// Indexes of the direct, indirect, and indirect2 blocks
+	int indirect2_index = block_indirect2_index(n);
+	int indirect_index = block_indirect_index(n);
+	int direct_index = block_direct_index(n);
 
+	eprintk("Three indicies: %d %d %d\n", indirect2_index, indirect_index, direct_index);
+	// List of blocks to free
+/*	uint32_t free_list[3];
+	int i;
+	uint32_t * zero_list[3];
+	for(i = 0; i < N; i++) {
+		free_list[i] = 0;
+		zero_list[i] = 0;
+	}
+	i = 0; // used as how many we've done*/
+
+	if(indirect2_index < 0 && indirect_index < 0) { // direct block range
+		free_block(oi->oi_direct[direct_index]);
+		oi->oi_direct[direct_index];
+	}
+	else if(indirect2_index < 0) { // indirect block range
 		block_list = ospfs_block(oi->oi_indirect);
-		if(block_list[n - 1 - OSPFS_NDIRECT] == 0) {
-			return -EIO;
-		}
-
-		// Free the data block
-		free_block(block_list[n - 1 - OSPFS_NDIRECT]);
-		block_list[n - 1 - OSPFS_NDIRECT] = 0;
-
-		// Check if we need to free the indirect block
-		if(n - OSPFS_NDIRECT == 0) {
-			free_block(oi->oi_indirect);
-			oi->oi_indirect = 0;
-		}
-
-	}
-	// Deallocate from the indirect2 block range
-	else if(n <= OSPFS_MAXFILEBLKS) {
-		int blockoff, indirect_index, direct_index;
-
-		// Make sure we have the indirect2 list
-		if(oi->oi_indirect2 == 0) {
-			return -EIO;
-		}
-
-		// Get the indirect2 list
-		indirect_block_list = ospfs_block(oi->oi_indirect2);
-
-		// Check that we have the indirect block
-
-		blockoff = n - 1 - OSPFS_NDIRECT - OSPFS_NINDIRECT;
-		indirect_index = (blockoff / OSPFS_NINDIRECT);
-		if(indirect_block_list[indirect_index] == 0) {
-			return -EIO;
-		}
-
-		// Get the indirect list
-		block_list = ospfs_block(indirect_block_list[indirect_index]);
-		// Check that we have the direct block
-		direct_index = (blockoff % OSPFS_NINDIRECT);
-		if(block_list[direct_index] == 0) {
-			return -EIO;
-		}
-
-		// Free the block(s)
 		free_block(block_list[direct_index]);
 		block_list[direct_index] = 0;
 
-		// Check if we need to free the indirect block
+		// Check if we can free the indirect block
 		if(direct_index == 0) {
-			free_block(indirect_block_list[indirect_index]);
-			indirect_block_list[indirect_index] = 0;
+			free_block(oi->oi_indirect);
+			oi->oi_indirect = 0;
 		}
+	}
+	else {
+		indirect_block_list = ospfs_block(oi->oi_indirect2);
+		block_list = ospfs_block(indirect_block_list[indirect_index]);
+		free_block(block_list[direct_index]);
+		block_list[direct_index] = 0;
 
-		// Now check if we need to free indirect2 block
-		if(direct_index == 0 && indirect_index == 0) {
+		if(direct_index == 0) {
+			free_block(indirect_block_list[direct_index]);
+			indirect_block_list[direct_index] = 0;
+		}
+		if(indirect_index == 0) {
 			free_block(oi->oi_indirect2);
 			oi->oi_indirect2 = 0;
 		}
-	}
-	// Don't know what is going on if we get here...
-	else {
-		return -EIO;
 	}
 
 	/* EXERCISE: Your code here */
