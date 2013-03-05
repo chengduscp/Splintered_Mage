@@ -307,6 +307,8 @@ opendisk(const char *name)
 	nextb = OSPFS_FREEMAP_BLK + nbitblock + ninodeblock;
 	nextinode = 0;
 
+	// THIS IS WHERE WE ADD THE CODE FOR THE JOURNAL BLOCK
+
 	super.os_magic = OSPFS_MAGIC;
 	super.os_nblocks = nblocks;
 	super.os_ninodes = ninodes;
