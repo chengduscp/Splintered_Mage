@@ -722,15 +722,24 @@ int block_direct_index(uint32_t blockno) {
 static int
 add_block(ospfs_inode_t *oi)
 {
-	// Indirect and Indirect2 lists
 	uint32_t * block_list;
 	uint32_t * indirect_block_list;
-	
+
 	// current number of blocks in file
 	uint32_t n = ospfs_size2nblocks(oi->oi_size);
 
+	// Indexes of the direct, indirect, and indirect2 blocks
+	int indirect2_index = block_indirect2_index(n);
+	int indirect_index = block_indirect_index(n);
+	int direct_index = block_direct_index(n);
+
+	eprintk("Three indicies: %d %d %d\n", indirect2_index, indirect_index, direct_index);
+
 	// keep track of allocations to free in case of -ENOSPC
-	uint32_t allocate[3] = { 0, 0, 0 };
+	int allocate[3] = { 0, 0, 0 };
+	// TODO: Implement auxilary function to get location of next free block after given index
+	// TODO: After that, make it so that it allocates all at once
+	// uint32_t *pointers[3] = { 0, 0, 0 };
 
 	// Allocate and prepare the data block
 	allocate[0] = allocate_block();
@@ -739,70 +748,12 @@ add_block(ospfs_inode_t *oi)
 	}
 	memset(ospfs_block(allocate[0]), 0, OSPFS_BLKSIZE);
 
-	// In direct block range
-	if(0 <= n && n < OSPFS_NDIRECT) {
-		oi->oi_direct[n] = allocate[0];
+	if(indirect2_index < 0 && indirect_index < 0) { // direct block range
+		oi->oi_direct[direct_index] = allocate[0];
 	}
-	// Check if starting indirect block
-	else if(n == OSPFS_NDIRECT) {
-		// Allocate and prepare the indirect block
-		allocate[1] = allocate_block();
-		if(!allocate[1]) {
-			free_block(allocate[0]);
-			return -ENOSPC;
-		}
-		memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
-
-		// Set the first element of the indirect block
-		oi->oi_indirect = allocate[1];
-		block_list = ospfs_block(oi->oi_indirect);
-		block_list[0] = allocate[0];
-	}
-	// Add to indirect block
-	else if(n < OSPFS_NDIRECT + OSPFS_NINDIRECT) {
-		// Add the to the end of the list
-		block_list = ospfs_block(oi->oi_indirect);
-		block_list[(n - OSPFS_NDIRECT)] = allocate[0];
-	}
-	// Check if we need to allocate the indirect2 block
-	else if(n == OSPFS_NDIRECT + OSPFS_NINDIRECT) {
-		// Allocate the indirect2 block
-		allocate[1] = allocate_block();
-		if(!allocate[1]) {
-			free_block(allocate[0]);
-			return -ENOSPC;
-		}
-
-		// Allocate the indirect block
-		allocate[2] = allocate_block();
-		if(!allocate[2]) {
-			free_block(allocate[0]);
-			free_block(allocate[1]);
-			return -ENOSPC;
-		}
-		
-		// Prepare the blocks
-		memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
-		memset(ospfs_block(allocate[2]), 0, OSPFS_BLKSIZE);
-
-		// Set the new indirect block and its first indirect and data block
-		oi->oi_indirect2 = allocate[0];
-		indirect_block_list = ospfs_block(oi->oi_indirect2);
-
-		indirect_block_list[0] = allocate[1];
-		block_list = ospfs_block(indirect_block_list[0]);
-		block_list[0] = allocate[2];
-	}
-	// See if we are still in the allowed file size
-	else if(n < OSPFS_MAXFILEBLKS) {
-		int indirect_index, direct_index;
-		// Get the indirect2 list
-		indirect_block_list = ospfs_block(oi->oi_indirect2);
-		
-		// Check if we need to allocate a new indirect block
-		indirect_index = (n - OSPFS_NDIRECT - OSPFS_NINDIRECT) / OSPFS_NINDIRECT;
-		if(indirect_block_list[indirect_index] == 0) {
-			// Allocate the new indirect block and prepare it
+	else if(indirect2_index < 0) { // indirect block range
+		// Check if we need to allocate the indirect block
+		if(direct_index == 0) {
 			allocate[1] = allocate_block();
 			if(!allocate[1]) {
 				free_block(allocate[0]);
@@ -810,21 +761,52 @@ add_block(ospfs_inode_t *oi)
 			}
 			memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
 
-			// Add the new indirect block to the list
-			indirect_block_list[indirect_index] = allocate[1];	
+			// Set the indirect block
+			oi->oi_indirect = allocate[1];
 		}
 
-		// Get the direct block list from the indirect block
-		block_list = ospfs_block(indirect_block_list[indirect_index]);
-
-		// Add the new data block
-		direct_index = (n - OSPFS_NDIRECT - OSPFS_NINDIRECT) % OSPFS_NINDIRECT;
+		// Get the direct block list
+		block_list = ospfs_block(oi->oi_indirect);
+		// Allocate the data block
 		block_list[direct_index] = allocate[0];
 	}
-	// No more blocks...
-	else {
-		free_block(allocate[0]);
-		return -EIO;
+	else { // indirect2 block range
+		// Check if we need to allocate the indirect2 block
+		if(indirect_index == 0 && direct_index == 0) {
+			allocate[2] = allocate_block();
+			if(!allocate[2]) {
+				free_block(allocate[0]);
+				return -ENOSPC;
+			}
+
+			memset(ospfs_block(allocate[2]), 0, OSPFS_BLKSIZE);
+
+			// Set the indirect2 block
+			oi->oi_indirect2 = allocate[2];
+		}
+
+		// Get the indirect2 list
+		indirect_block_list = ospfs_block(oi->oi_indirect2);
+
+		if(direct_index == 0) {
+			allocate[1] = allocate_block();
+			if(!allocate[1]) {
+				free_block(allocate[0]);
+				if(allocate[2]) { // Check if we allocated the indirect2 block
+					free_block(allocate[2]);
+				}
+				return -ENOSPC;
+			}
+			memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
+
+			// Set the indirect block
+			indirect_block_list[indirect_index] = allocate[1];
+		}
+		
+		// Get the direct block list
+		block_list = ospfs_block(indirect_block_list[indirect_index]);
+		// Allocate the data block
+		block_list[direct_index] = allocate[0];
 	}
 
 	/* EXERCISE: Your code here */
@@ -872,20 +854,18 @@ remove_block(ospfs_inode_t *oi)
 	int indirect_index = block_indirect_index(n);
 	int direct_index = block_direct_index(n);
 
-	eprintk("Three indicies: %d %d %d\n", indirect2_index, indirect_index, direct_index);
 	// List of blocks to free
-/*	uint32_t free_list[3];
-	int i;
-	uint32_t * zero_list[3];
-	for(i = 0; i < N; i++) {
-		free_list[i] = 0;
-		zero_list[i] = 0;
-	}
-	i = 0; // used as how many we've done*/
+/*
+	uint32_t free_list[3] = { 0, 0, 0 };
+	uint32_t *zero_list[3] = { 0, 0, 0 };
+	eprintk("Three indicies: %d %d %d\n", indirect2_index, indirect_index, direct_index);
+	int i = 0; // used as how many we've done
+*/
+
 
 	if(indirect2_index < 0 && indirect_index < 0) { // direct block range
 		free_block(oi->oi_direct[direct_index]);
-		oi->oi_direct[direct_index];
+		oi->oi_direct[direct_index] = 0;
 	}
 	else if(indirect2_index < 0) { // indirect block range
 		block_list = ospfs_block(oi->oi_indirect);
@@ -898,7 +878,7 @@ remove_block(ospfs_inode_t *oi)
 			oi->oi_indirect = 0;
 		}
 	}
-	else {
+	else { // indirect2 block range
 		indirect_block_list = ospfs_block(oi->oi_indirect2);
 		block_list = ospfs_block(indirect_block_list[indirect_index]);
 		free_block(block_list[direct_index]);
