@@ -19,6 +19,10 @@
 #ifndef MIN
 #define MIN(x, y) ((x < y) ? x : y)
 #endif
+#ifndef MAX
+#define MAX(x, y) ((x > y) ? x : y)
+#endif
+
 
 /****************************************************************************
  * ospfsmod
@@ -574,7 +578,6 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 		change_size(oi, 0);
 	}
 
-
 	return 0;
 }
 
@@ -859,7 +862,7 @@ remove_block(ospfs_inode_t *oi)
 	// List of blocks to free
 	uint32_t free_list[3] = { 0, 0, 0 };
 	uint32_t *zero_list[3] = { 0, 0, 0 };
-	eprintk("Three indicies: %d %d %d\n", indirect2_index, indirect_index, direct_index);
+	//eprintk("Three indicies: %d %d %d\n", indirect2_index, indirect_index, direct_index);
 	n_blocks_freed = 0; // used as how many we've done
 /*
 */
@@ -874,10 +877,6 @@ remove_block(ospfs_inode_t *oi)
 		free_list[n_blocks_freed] = block_list[direct_index];
 		zero_list[n_blocks_freed] = &block_list[direct_index];
 		n_blocks_freed++;
-
-		for (i = 0; i < n_blocks_freed; i++) {
-			eprintk("Freed 2block %d\n", free_list[i]);
-		}
 
 		// Check if we can free the indirect block
 		if(direct_index == 0) {
@@ -907,12 +906,152 @@ remove_block(ospfs_inode_t *oi)
 	for (i = 0; i < n_blocks_freed; i++) {
 		free_block(free_list[i]);
 		*(zero_list[i]) = 0;
-		eprintk("Freed block %d\n", free_list[i]);
 	}
 
 	/* EXERCISE: Your code here */
 	oi->oi_size = (n-1)*OSPFS_BLKSIZE;
 	return 0; // Replace this line
+}
+
+// Freeing from direct block range
+// THIS ASSUMES YOU HAVE DONE ALL APPROPRIATE CHECKING BEFORE CALLING THE FUNCTION
+// Inputs: oi - inode to be changed
+//         current_n - current size of the inode in blocks
+//         new_n - new size of the inode in blocks
+// Returns: new size in blocks
+int
+free_direct_block(ospfs_inode_t *oi, uint32_t current_n, uint32_t new_n)
+{
+	// n represents number of blocks
+	uint32_t n_freed, i;
+	uint32_t free_blocknos[OSPFS_NDIRECT];
+	ospfs_inode_t new_oi = *oi;
+
+	// Get the list of blocks to free
+	n_freed = 0;
+	while(n_freed < (current_n - new_n)) {
+		free_blocknos[n_freed] = new_oi.oi_direct[current_n - n_freed - 1];
+		new_oi.oi_direct[current_n - n_freed - 1] = 0;
+		n_freed++;
+	}
+
+	// Here is where we store them in the journal, but for now just free them
+	// That is why this looks so inefficient
+
+	// Now free the blocks
+	for(i = 0; i < n_freed; i++) {
+		free_block(free_blocknos[i]);
+	}
+	*oi = new_oi;
+
+	return new_n;
+}
+
+// Frees the direct blocks of an indirect block
+// THIS ASSUMES YOU HAVE DONE ALL APPROPRIATE CHECKING BEFORE CALLING THE
+//    FUNCTION
+// Inputs: indir_block - indirect block's data (size OSPFS_NINDIRECT)
+//         blockno - indirect block's block number
+//         current_n - number of blocks in the indirect block currently
+//         new_n - number of blocks in the indirect block afterwards
+// Returns: number of blocks left in the indirect block
+int
+free_from_indirect(uint32_t *indir_block, uint32_t current_n, uint32_t new_n)
+{
+	// n represents number of blocks
+	uint32_t n_freed, i;
+	uint32_t free_blocknos[OSPFS_NINDIRECT];
+	uint32_t new_indirect_block[OSPFS_NINDIRECT];
+
+	// Copy the indirect_block to new_indirect_block
+	memcpy(new_indirect_block, indir_block, OSPFS_BLKSIZE);
+
+	// Get the blocks to free
+	n_freed = 0;
+	while(n_freed < (current_n - new_n)) {
+		eprintk("assigned freed block %d\n", new_indirect_block[current_n - n_freed - 1]);
+		free_blocknos[n_freed] = new_indirect_block[current_n - n_freed - 1];
+		new_indirect_block[current_n - n_freed - 1] = 0;
+		n_freed++;
+	}
+
+	// This is the point where we would add it to the journal
+	// BUT for now we just free the blocks
+
+	// Now free the blocks
+	for(i = 0; i < n_freed; i++) {
+		free_block(free_blocknos[i]);
+		eprintk("freed block %d\n", free_blocknos[i]);
+	}
+	// Write out the new indirect block
+	memcpy(indir_block, new_indirect_block, OSPFS_BLKSIZE);
+
+	return new_n;	
+}
+
+// Shrink - first step to making resize smaller atomic
+int
+shrink_size(ospfs_inode_t *oi, uint32_t new_size)
+{
+	// Indirect block and indirect2 block (if needed)
+	uint32_t * block_list;
+	uint32_t * indirect_block_list;
+	// Indexes of the old size
+	int indirect2_index, indirect_index, direct_index;
+	// Size of the file in block
+	uint32_t current_size_blocks, new_size_blocks;
+	// Return value
+	int r = 0;
+
+	if(oi->oi_size <= new_size)
+		return -1; // What error code for this situation?
+
+	// Get the sizes in blocks
+	current_size_blocks = ospfs_size2nblocks(oi->oi_size);
+	new_size_blocks = ospfs_size2nblocks(new_size);
+
+	// Indexes of the direct, indirect, and indirect2 blocks
+	indirect2_index = block_indirect2_index(current_size_blocks);
+	indirect_index = block_indirect_index(current_size_blocks);
+	direct_index = block_direct_index(current_size_blocks);
+
+	// Check for which range the current block is in
+	// direct block range
+	if(indirect2_index < 0 && indirect_index < 0) {
+		r = free_direct_block(oi, current_size_blocks, new_size_blocks);
+	}
+	// indirect block range
+	else if(indirect2_index < 0) {
+		// Calculate how much to shrink the indirect block
+		// n means number of blocks
+		int current_indir_n, new_indir_n;
+		current_indir_n = current_size_blocks - OSPFS_NDIRECT;
+		new_indir_n = MAX(0, (int)new_size_blocks - OSPFS_NDIRECT);
+
+		eprintk("Shrunk from size %d to %d\n", current_indir_n, new_indir_n);
+		block_list = ospfs_block(oi->oi_indirect);
+		r = free_from_indirect(block_list, current_indir_n, new_indir_n);
+
+		// This is where we would check if we need to free the indirect block
+		// and add that to the journal, but for now we just free it if needed
+		if(r == 0) {
+			free_block(oi->oi_indirect);
+			oi->oi_indirect = 0;
+		}
+
+		if(new_size_blocks - OSPFS_NDIRECT < 0)
+			r = free_direct_block(oi, current_size_blocks, new_size_blocks);
+
+		// TODO: Change this after more testing
+		r = -1;
+	}
+	// indirect2 block range
+	else {
+		eprintk("We haven't gotten there yet...");
+		r = -1;
+	}
+
+	return r;
 }
 
 
@@ -961,6 +1100,15 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 	// Simple check to make sure we don't try to go over the file size limit
 	if(OSPFS_MAXFILESIZE < new_size)
 		return -ENOSPC;
+
+	// Check if we are decreasing size
+	if(new_size < old_size) {
+		eprintk("Changing size from %d to %d\n", old_size, new_size);
+		int r = shrink_size(oi, new_size);
+		if(r == 0)
+			return 0;
+	}
+
 
 	while (ospfs_size2nblocks(oi->oi_size) < ospfs_size2nblocks(new_size)) {
         /* EXERCISE: Your code here */

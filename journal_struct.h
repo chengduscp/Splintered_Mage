@@ -24,20 +24,21 @@ typedef struct journal_stuct {
 	// Header info for block writing
 	uint32_t n_blocks_affected;
 	// uint32_t n_blocks_freed
+	uint32_t dir_blocknos_affected[OSPFS_NDIRECT];
 
 	// For block writing
 	uint32_t blocknos_affected[JOURNAL_MAX_BLOCKS];
-	// TODO: Is this the right way to format this...
-	// uint32_t blocknos_freed[JOURNAL_MAX_BLOCKS];
 
 	// TODO: Make sure this is aligned at the start of a block
 	// Actual blocks
-	uint32_t block[JOURNAL_MAX_BLOCKS];
+	block dir_block[OSPFS_NDIRECT];
+	block indir_block[JOURNAL_MAX_BLOCKS];
 } journal_t;
 
 // TODO: Figure out EXACTLY how many blocks we need for this
 // Guestimate: 1 block for the flags, n_blocks*, and inodes.
 //   2 blocks - one for each blocknos_* list
+//   10 blocks - one for each direct block affected
 //   256 blocks - one for each block for the journal
 
 
