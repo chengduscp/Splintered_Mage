@@ -15,24 +15,24 @@ typedef struct journal_stuct {
 	uint32_t execute_type;
 	uint32_t completed;
 
-	// For changing 2 inodes
+	// For changing inodes
 	uint32_t inode_num;
 	ospfs_inode_t inode;
-	uint32_t inode2_num;
-	ospfs_inode_t inode2;
 
 	// Header info for block writing
 	uint32_t n_blocks_affected;
-	// uint32_t n_blocks_freed
-	uint32_t dir_blocknos_affected[OSPFS_NDIRECT];
+	uint32_t indir_blockno;
 
-	// For block writing
+	// For block writing (direct and indirect blocks)
+	uint32_t dir_blocknos_affected[OSPFS_NDIRECT];
 	uint32_t blocknos_affected[JOURNAL_MAX_BLOCKS];
 
 	// TODO: Make sure this is aligned at the start of a block
 	// Actual blocks
-	block dir_block[OSPFS_NDIRECT];
-	block indir_block[JOURNAL_MAX_BLOCKS];
+	block indir2_block;
+	block indir_block;
+	block dir_blocks[OSPFS_NDIRECT];
+	block write_blocks[JOURNAL_MAX_BLOCKS];
 } journal_t;
 
 // TODO: Figure out EXACTLY how many blocks we need for this
