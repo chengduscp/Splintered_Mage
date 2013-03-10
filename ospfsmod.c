@@ -15,6 +15,9 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 
+// For the journal
+#include "journal.h"
+
 // Some useful macros...
 #ifndef MIN
 #define MIN(x, y) ((x < y) ? x : y)
@@ -691,6 +694,42 @@ int block_direct_index(uint32_t blockno) {
 	return blockno % OSPFS_NINDIRECT;
 }
 
+// Initializes a file_index_t based on a given inode
+int
+init_file_index(ospfs_inode_t *oi, file_index_t *idx) {
+	// Current number of blocks in file
+	idx->blk_size = ospfs_size2nblocks(oi->oi_size);
+
+	// Indexes of the direct, indirect, and indirect2 blocks
+	idx->indir2_idx = block_indirect2_index(idx->blk_size);
+	idx->indir_idx = block_indirect_index(idx->blk_size);
+	idx->dir_idx = block_direct_index(idx->blk_size);
+
+	// Get the direct and indirect blocks if needed
+	idx->indir_blk_list = 0;
+	idx->blk_list = 0;
+
+	// Check for the double indirect block
+	if(idx->indir2_idx > 0 && oi->oi_indirect2 != 0) {
+		// Getting the indir2 and indir block data
+		idx->indir_blk_list = ospfs_block(oi->oi_indirect2);
+
+		// Safety check for the indirect block, in case it hasn't 
+		//   been allocated yet
+		if(idx->indir_blk_list[idx->indir_idx] != 0) {
+			idx->blk_list =
+				ospfs_block(idx->indir_blk_list[idx->indir_idx]);
+		}
+	}
+	// Check for the indirect block
+	else if(idx->indir_idx == 0 && oi->oi_indirect != 0) {
+		// Get the indir block data
+		idx->blk_list = ospfs_block(oi->oi_indirect);
+	}
+
+	return 0;
+}
+
 // add_block(ospfs_inode_t *oi)
 //   Adds a single data block to a file, adding indirect and
 //   doubly-indirect blocks if necessary. (Helper function for
@@ -725,22 +764,14 @@ int block_direct_index(uint32_t blockno) {
 static int
 add_block(ospfs_inode_t *oi)
 {
-	uint32_t * block_list;
-	uint32_t * indirect_block_list;
-	int indirect2_index, indirect_index, direct_index;
-	// current number of blocks in file
-	uint32_t n = ospfs_size2nblocks(oi->oi_size);
+	file_index_t idx;
+	init_file_index(oi, &idx);
 
 	// keep track of allocations to free in case of -ENOSPC
 	int allocate[3] = { 0, 0, 0 };
 	// TODO: Implement auxilary function to get location of next free block after given index
 	// TODO: After that, make it so that it allocates all at once
 	// uint32_t *pointers[3] = { 0, 0, 0 };
-
-	// Indexes of the direct, indirect, and indirect2 blocks
-	indirect2_index = block_indirect2_index(n);
-	indirect_index = block_indirect_index(n);
-	direct_index = block_direct_index(n);
 
 	// Allocate and prepare the data block
 	allocate[0] = allocate_block();
@@ -749,12 +780,12 @@ add_block(ospfs_inode_t *oi)
 	}
 	memset(ospfs_block(allocate[0]), 0, OSPFS_BLKSIZE);
 
-	if(indirect2_index < 0 && indirect_index < 0) { // direct block range
-		oi->oi_direct[direct_index] = allocate[0];
+	if(idx.indir2_idx < 0 && idx.indir_idx < 0) { // direct block range
+		oi->oi_direct[idx.dir_idx] = allocate[0];
 	}
-	else if(indirect2_index < 0) { // indirect block range
+	else if(idx.indir2_idx < 0) { // indirect block range
 		// Check if we need to allocate the indirect block
-		if(direct_index == 0) {
+		if(idx.dir_idx == 0) {
 			allocate[1] = allocate_block();
 			if(!allocate[1]) {
 				free_block(allocate[0]);
@@ -764,17 +795,16 @@ add_block(ospfs_inode_t *oi)
 
 			// Set the indirect block
 			oi->oi_indirect = allocate[1];
+			idx.blk_list = ospfs_block(oi->oi_indirect);
 		}
 
-		// Get the direct block list
-		block_list = ospfs_block(oi->oi_indirect);
 		// Allocate the data block
-		block_list[direct_index] = allocate[0];
-		eprintk("Allocating for indirect %d: %d\n", direct_index, block_list[direct_index]);
+		idx.blk_list[idx.dir_idx] = allocate[0];
+		eprintk("Allocating for indirect %d: %d\n", idx.dir_idx, idx.blk_list[idx.dir_idx]);
 	}
 	else { // indirect2 block range
 		// Check if we need to allocate the indirect2 block
-		if(indirect_index == 0 && direct_index == 0) {
+		if(idx.indir_idx == 0 && idx.dir_idx == 0) {
 			allocate[2] = allocate_block();
 			if(!allocate[2]) {
 				free_block(allocate[0]);
@@ -785,12 +815,10 @@ add_block(ospfs_inode_t *oi)
 
 			// Set the indirect2 block
 			oi->oi_indirect2 = allocate[2];
+			idx.indir_blk_list = ospfs_block(oi->oi_indirect2);
 		}
 
-		// Get the indirect2 list
-		indirect_block_list = ospfs_block(oi->oi_indirect2);
-
-		if(direct_index == 0) {
+		if(idx.dir_idx == 0) {
 			allocate[1] = allocate_block();
 			if(!allocate[1]) {
 				free_block(allocate[0]);
@@ -802,18 +830,20 @@ add_block(ospfs_inode_t *oi)
 			}
 			memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
 
-			// Set the indirect block
-			indirect_block_list[indirect_index] = allocate[1];
+
+			// Set the indirect block in the doubly indirect block list
+			//indirect_block_list[idx.indir_idx] = allocate[1];
+			idx.indir_blk_list[idx.indir_idx] = allocate[1];
+
+			// Set the newly allocated block as the block list
+			idx.blk_list = ospfs_block(allocate[1]);
 		}
-		
-		// Get the direct block list
-		block_list = ospfs_block(indirect_block_list[indirect_index]);
-		// Allocate the data block
-		block_list[direct_index] = allocate[0];
+		// Set the data block in the indirect block list
+		idx.blk_list[idx.dir_idx] = allocate[0];
 	}
 
 	/* EXERCISE: Your code here */
-	oi->oi_size = (n+1)*OSPFS_BLKSIZE;
+	oi->oi_size = (idx.blk_size + 1) * OSPFS_BLKSIZE;
 	return 0; // Replace this line
 }
 

@@ -1,7 +1,6 @@
 #ifndef JOURNAL_STRUCT_HEADER
 #define JOURNAL_STRUCT_HEADER
 
-#include "stdint.h"
 #include "ospfs.h"
 
 // Journal types
@@ -41,6 +40,7 @@
 +----------------------------+
 */
 
+// Header information (block 0 of journal)
 typedef struct journal_header_struct {
 	// Journal Flags
 	uint32_t execute_type;
@@ -53,16 +53,30 @@ typedef struct journal_header_struct {
 	// To see how many blocks to write
 	uint32_t n_blocks_affected;
 
-	// Info for indirect block writing
+	// Info for doubly indirect block writing
 	uint32_t indir_blockno;
 
 	// Info for direct block writing
 	uint32_t dir_blocknos_affected[OSPFS_NDIRECT];
 } journal_header_t;
 
-typedef struct blocknos_affected_struct {
-	uint32_t a[JOURNAL_MAX_BLOCKS];
-} blocknos_affected_t;
+// Useful struct
+typedef struct file_index_struct {
+	uint32_t * blk_list;
+	uint32_t * indir_blk_list;
+	uint32_t blk_size;
+	int indir2_idx, indir_idx, dir_idx;
+} file_index_t;
+
+// For list of blocks affected (block 1 of journal)
+typedef struct journal_blocknos_affected {
+	uint32_t blocknos[JOURNAL_MAX_BLOCKS];
+} journal_blocknos_t;
+
+// For indirect block, indirect2 block, and data blocks, use this
+typedef struct journal_block_struct {
+	char buf[OSPFS_BLKSIZE];
+} journal_block_t;
 
 #endif
 
