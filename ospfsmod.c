@@ -605,8 +605,8 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 //
 //   You can use the functions bitvector_set(), bitvector_clear(), and
 //   bitvector_test() to do bit operations on the map.
-#define OSPFS_FIRST_VALID_BLOCK ospfs_super->os_firstinob + \
- 								(ospfs_super->os_ninodes / OSPFS_BLKINODES)
+#define OSPFS_FIRST_VALID_BLOCK ospfs_super->os_firstdatab
+
 static uint32_t
 allocate_block(void)
 {

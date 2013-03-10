@@ -14,6 +14,9 @@
 #include "ospfs.h"
 #include "md5.h"
 
+// For the journal
+#include "journal.h"
+
 /****************************************************************************
  * ospfsformat
  *
@@ -28,6 +31,8 @@ int diskfd;
 uint32_t nblocks;
 uint32_t ninodes;
 uint32_t nbitblock;
+// Number of blocks we will allocate for the journal
+uint32_t njournalblock;
 uint32_t nextb;
 uint32_t nextinode;
 int verbose = 0;
@@ -45,7 +50,9 @@ enum {
 	BLOCK_DIR,
 	BLOCK_FILE,
 	BLOCK_BITS,
-	BLOCK_INODES
+	BLOCK_INODES,
+	// NEW TYPE
+	BLOCK_JOURNAL
 };
 
 struct Block {
@@ -273,6 +280,8 @@ opendisk(const char *name)
 {
 	int i, r;
 	uint32_t ninodeblock;
+	// Journal blocks
+	uint32_t first_journal_block;
 	struct stat s;
 	struct Block *b;
 	struct ospfs_inode *oi;
@@ -300,19 +309,34 @@ opendisk(const char *name)
 
 	ninodeblock = (ninodes + OSPFS_BLKINODES - 1) / OSPFS_BLKINODES;
 	for (i = 0; i < ninodeblock; i++) {
-		b = getblk(OSPFS_FREEMAP_BLK + nbitblock + i, 1, BLOCK_INODES);
+		b = getblk(OSPFS_FREEMAP_BLK + nbitblock + i,
+		            1, BLOCK_INODES);
 		putblk(b);
 	}
 
-	nextb = OSPFS_FREEMAP_BLK + nbitblock + ninodeblock;
-	nextinode = 0;
+	// Adding the journal before the inodes
+	njournalblock = JOURNAL_HEADER_SIZE + JOURNAL_BLOCKNO_LIST_SIZE +
+						JOURNAL_INDIR_BLOCKS + JOURNAL_MAX_BLOCKS;
 
-	// THIS IS WHERE WE ADD THE CODE FOR THE JOURNAL BLOCK
+	// Find the first journal block
+	first_journal_block = OSPFS_FREEMAP_BLK + nbitblock + (ninodeblock / OSPFS_BLKINODES);
+	// clear the journal blocks
+	for (i = 0; i < njournalblock; i++) {
+		b = getblk(first_journal_block + i, 1, BLOCK_JOURNAL);
+		putblk(b);
+	}
+
+	nextb = OSPFS_FREEMAP_BLK + nbitblock + njournalblock + ninodeblock;
+	nextinode = 0;
 
 	super.os_magic = OSPFS_MAGIC;
 	super.os_nblocks = nblocks;
 	super.os_ninodes = ninodes;
 	super.os_firstinob = OSPFS_FREEMAP_BLK + nbitblock;
+	// Our added fields to the super block
+	super.os_firstjournalb = first_journal_block;
+	super.os_njournalb = njournalblock;
+	super.os_firstdatab = nextb;
 	if (verbose)
 		fprintf(stderr, "superblock, free block bitmap %d, first inode block %d, first data block %d\n", OSPFS_FREEMAP_BLK, super.os_firstinob, nextb);
 }

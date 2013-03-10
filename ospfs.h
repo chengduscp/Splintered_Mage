@@ -66,6 +66,10 @@ typedef struct ospfs_super {
 	uint32_t os_nblocks;   // Number of blocks on disk
 	uint32_t os_ninodes;   // Number of inodes on disk
 	uint32_t os_firstinob; // First inode block
+	// Added fields
+	uint32_t os_firstjournalb;  // First journal block
+	uint32_t os_njournalb;      // Number of blocks in the journal
+	uint32_t os_firstdatab;     // First data block
 } ospfs_super_t;
 
 
