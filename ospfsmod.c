@@ -1041,15 +1041,14 @@ shrink_size(ospfs_inode_t *oi, uint32_t new_size)
 
 		if(new_size_blocks - OSPFS_NDIRECT < 0)
 			r = free_direct_block(oi, current_size_blocks, new_size_blocks);
-
-		// TODO: Change this after more testing
-		r = -1;
 	}
 	// indirect2 block range
 	else {
 		eprintk("We haven't gotten there yet...");
 		r = -1;
 	}
+
+	oi->oi_size = new_size;
 
 	return r;
 }
@@ -1102,7 +1101,8 @@ change_size(ospfs_inode_t *oi, uint32_t new_size)
 		return -ENOSPC;
 
 	// Check if we are decreasing size
-	if(new_size < old_size) {
+	if(new_size < old_size &&
+			new_size < OSPFS_NDIRECT + OSPFS_NINDIRECT) {
 		eprintk("Changing size from %d to %d\n", old_size, new_size);
 		int r = shrink_size(oi, new_size);
 		if(r == 0)
