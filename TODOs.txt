@@ -1,0 +1,23 @@
+TODO:
+Make link work with journal_header_t -- needs to change journal_header_t
+Make create_file work with journal_header_t (similar to link)
+    Make unlink work with journal_header_t with no change size
+    Get shrink_size to use file_index and journal_indir_block
+    Make grow size with file_index and journal_indir_block
+        Make unlink work with change_size (straightforward after we get change_size with journal)
+            Start execute_journal
+            Work for change_size
+            Work for link
+            Work for unlink
+            Make ospfs_write write to journal and to file
+                Make ospfs_write only write to file
+                Make execute_journal work for writing
+                 |
+                 \==> DECISION: Do we make change_size happend then write everthing,
+                                 or do we make change_size happen with the write? Second
+                                 option simpler, first option more what we want.
+                                 My vote: We wait until we are there to see if we can even
+                                          do it...
+
+
+
