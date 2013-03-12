@@ -16,6 +16,13 @@
 #define JOURNAL_INDIR_BLOCKS       2
 #define JOURNAL_MAX_BLOCKS        256
 
+// Journal offsets
+#define JOURNAL_HEADER_POS         0
+#define JOURNAL_BLOCKNO_LIST_POS   1
+#define JOURNAL_INDIR_BLOCK_POS    2
+#define JOURNAL_INDIR2_BLOCK_POS   3
+#define JOURNAL_DATA_BLOCKS_POS    4
+
 // Journal resize types
 // No allocation/freeing of indirect or indirect2 blocks
 #define JOURNAL_RESIZE_NORMAL     0 
@@ -63,20 +70,15 @@ typedef struct journal_header_struct {
 	uint32_t n_blocks_affected;
 
 	// Info for doubly indirect block writing
-	uint32_t indir2_blockno;
-	uint32_t indir_blockno;
+	uint32_t indirect2_blockno;
+	uint32_t indirect_blockno;
 
 	// For block freeing and adding
 	uint32_t file_resize_type;
-
-	// Info for direct block writing
-	uint32_t dir_blocknos_affected[OSPFS_NDIRECT];
 } journal_header_t;
 
 // Useful struct (going to change)
 typedef struct file_index_struct {
-	uint32_t * blk_list; // Pointer to the actual indirect block
-	uint32_t * indir_blk_list; // Pointer to the actual indirect2 block
 	uint32_t blk_size; // Size in blocks of the file
 	int indir2_idx, indir_idx, dir_idx; // Indecies of the file
 } file_index_t;
