@@ -16,6 +16,15 @@
 #define JOURNAL_INDIR_BLOCKS       2
 #define JOURNAL_MAX_BLOCKS        256
 
+// Journal resize types
+// No allocation/freeing of indirect or indirect2 blocks
+#define JOURNAL_RESIZE_NORMAL     0 
+// Allocation/freeing of indirect or indirect2 blocks
+#define JOURNAL_RESIZE_INDIRECT   1
+#define JOURNAL_RESIZE_INDIRECT2  2
+// This is the RESIZE_INDIRECT and RESIZE_INDIRECT2 or'd together
+#define JOURNAL_RESIZE_BOTH       3
+
 // Structure of journal
 /*
           Block Type            Block Number
@@ -54,19 +63,44 @@ typedef struct journal_header_struct {
 	uint32_t n_blocks_affected;
 
 	// Info for doubly indirect block writing
+	uint32_t indir2_blockno;
 	uint32_t indir_blockno;
+
+	// For block freeing and adding
+	uint32_t file_resize_type;
 
 	// Info for direct block writing
 	uint32_t dir_blocknos_affected[OSPFS_NDIRECT];
 } journal_header_t;
 
-// Useful struct
+// Useful struct (going to change)
 typedef struct file_index_struct {
-	uint32_t * blk_list;
-	uint32_t * indir_blk_list;
-	uint32_t blk_size;
-	int indir2_idx, indir_idx, dir_idx;
+	uint32_t * blk_list; // Pointer to the actual indirect block
+	uint32_t * indir_blk_list; // Pointer to the actual indirect2 block
+	uint32_t blk_size; // Size in blocks of the file
+	int indir2_idx, indir_idx, dir_idx; // Indecies of the file
 } file_index_t;
+
+// To simplify file resize requests -- this is what we need to know!!
+typedef struct resize_request_struct {
+	// file index for knowing where we are in the file
+	file_index_t index;
+
+	// Knowing whether we are freeing the indirect(2) block or not
+	uint32_t resize_type;
+
+	// Indirect block (if needed)
+	uint32_t indirect_blockno; // in case we are in indirect2 range
+	uint32_t indirect_block[OSPFS_NINDIRECT];
+
+	// Doubly indirect block (if needed)
+	uint32_t indirect2_blockno; // in case we change indir2 pointer
+	uint32_t indirect2_block[OSPFS_NINDIRECT];
+
+	// List of affected blocknos
+	uint32_t n; // n blocks affected
+	uint32_t blocknos[JOURNAL_MAX_BLOCKS];
+} resize_request;
 
 // For list of blocks affected (block 1 of journal)
 typedef struct journal_blocknos_affected {
