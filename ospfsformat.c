@@ -319,7 +319,7 @@ opendisk(const char *name)
 						JOURNAL_INDIR_BLOCKS + JOURNAL_MAX_BLOCKS;
 
 	// Find the first journal block
-	first_journal_block = OSPFS_FREEMAP_BLK + nbitblock + (ninodeblock / OSPFS_BLKINODES);
+	first_journal_block = OSPFS_FREEMAP_BLK + nbitblock + ninodeblock;
 	// clear the journal blocks
 	for (i = 0; i < njournalblock; i++) {
 		b = getblk(first_journal_block + i, 1, BLOCK_JOURNAL);
