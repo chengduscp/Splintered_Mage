@@ -7,8 +7,9 @@
 #define JOURNAL_EMPTY  0
 #define JOURNAL_WRITE  1
 #define JOURNAL_FREE   2
-#define JOURNAL_SYMLNK 3
-#define JOURNAL_HRDLNK 4
+#define JOURNAL_ALLOC  3
+#define JOURNAL_SYMLNK 4
+#define JOURNAL_HRDLNK 5
 
 // Journal sizes
 #define JOURNAL_HEADER_SIZE        1
@@ -87,6 +88,9 @@ typedef struct file_index_struct {
 typedef struct resize_request_struct {
 	// file index for knowing where we are in the file
 	file_index_t index;
+
+	// For allocating blocks
+	uint32_t lower_bound, upper_bound;
 
 	// Knowing whether we are freeing the indirect(2) block or not
 	uint32_t resize_type;
