@@ -1111,8 +1111,16 @@ execute_journal(void)
 		}
 
 	}
+	else if(journal_header->execute_type == JOURNAL_WRITE) {
+		for(i = 0; i < journal_header->n_blocks_affected; i++) {
+			memcpy(ospfs_block(blocknos[i]),
+				ospfs_block(ospfs_super->os_firstjournalb + 
+					JOURNAL_DATA_BLOCKS_POS + i), OSPFS_BLKSIZE);
+		}
+	}
 
 	// Done our tasks, now empty the journal
+	journal_header->completed = 0;
 	journal_header->execute_type = JOURNAL_EMPTY;
 	return 0;
 }
@@ -1276,8 +1284,6 @@ grow_size(uint32_t inode_num, uint32_t new_size)
 static int
 change_size(ospfs_inode_t *oi, uint32_t inode_num, uint32_t new_size)
 {
-	int r = 0, retval = 0;
-
 	// Simple check to make sure we don't try to go over the file size limit
 	if(OSPFS_MAXFILESIZE < new_size)
 		return -ENOSPC;
@@ -1285,7 +1291,6 @@ change_size(ospfs_inode_t *oi, uint32_t inode_num, uint32_t new_size)
 	if(new_size < oi->oi_size) {
 		return free_memory(inode_num, new_size);
 	}
-	// still working on this...
 	else if(oi->oi_size < new_size) { 
 		return grow_size(inode_num, new_size);
 	}
@@ -1347,7 +1352,7 @@ ospfs_notify_change(struct dentry *dentry, struct iattr *attr)
 //
 //   EXERCISE: Complete this function.
 
-int i = 0;
+
 static ssize_t
 ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 {
@@ -1408,6 +1413,51 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 	return (retval >= 0 ? amount : retval);
 }
 
+// Journal write functions
+int
+write_to_journal(journal_header_t *header, uint32_t *blocknos,
+	uint32_t *blocks_stored)
+{
+	journal_header_t *journal_header;
+
+	// Write out header (simple for write)
+	header->n_blocks_affected = *blocks_stored;
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS),
+			header, (sizeof(journal_header_t)));
+
+	// Write out blocknos
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb +
+		JOURNAL_BLOCKNO_LIST_POS), blocknos,
+		JOURNAL_MAX_BLOCKS * (sizeof(uint32_t)));	
+
+	// Set the completed journal flag
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	journal_header->completed = 1;
+
+	return 0;
+}
+
+// Restart the write journal header
+int
+restart_write_journal(journal_header_t *header, uint32_t *blocknos,
+	uint32_t *blocks_stored)
+{
+	journal_header_t *journal_header;
+
+	// Restart block count
+	*blocks_stored = 0;
+
+	// Clear the blocknos
+	memset(blocknos, 0, OSPFS_BLKSIZE);
+
+	// Set the started flag of the journal
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	journal_header->execute_type = JOURNAL_WRITE;
+
+	return 0;
+}
 
 // ospfs_write
 //	Linux calls this function to write data to a file.
@@ -1427,11 +1477,23 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 //   EXERCISE: Complete this function.
 
 static ssize_t
-ospfs_write(struct file *filp, const char __user *buffer, size_t count, loff_t *f_pos)
+ospfs_write(struct file *filp, const char __user *buffer, size_t count, 
+	loff_t *f_pos)
 {
-	ospfs_inode_t *oi = ospfs_inode(filp->f_dentry->d_inode->i_ino);
-	int retval = 0;
-	size_t amount = 0;
+	journal_header_t header;
+	ospfs_inode_t *oi;
+	char data_buf[OSPFS_BLKSIZE];
+	uint32_t inode_num, blocks_stored;
+	uint32_t blocknos[JOURNAL_MAX_BLOCKS];
+	int retval;
+	size_t amount;
+
+	// Initialize variables
+	inode_num = filp->f_dentry->d_inode->i_ino;
+	oi = ospfs_inode(inode_num);
+	blocks_stored = 0;
+	retval = 0;
+	amount = 0;
 
 	// Support files opened with the O_APPEND flag.  To detect O_APPEND,
 	// use struct file's f_flags field and the O_APPEND bit.
@@ -1442,53 +1504,79 @@ ospfs_write(struct file *filp, const char __user *buffer, size_t count, loff_t *
 
 	// If the user is writing past the end of the file, change the file's
 	// size to accomodate the request.  (Use change_size().)
-	/* EXERCISE: Your code here */
 	if(oi->oi_size < (*f_pos) + count) {
 		// We gotta do something about this one...
-		retval = change_size(oi, filp->f_dentry->d_inode->i_ino,
-								(*f_pos + count));
+		retval = change_size(oi, inode_num, (*f_pos + count));
 		if(retval < 0) {
 			return retval;
 		}
 	}
 
+	// Initialize header
+	memset(&header, 0, sizeof(journal_header_t));
+	header.inode = *oi; // make copy of inode
+	header.inode_num = inode_num;
+	header.execute_type = JOURNAL_WRITE; // Writing data
+
+
 	// Copy data block by block
 	while (amount < count && retval >= 0) {
-		uint32_t blockno = ospfs_inode_blockno(oi, *f_pos);
-		uint32_t n;
-		char *data;
+		uint32_t blockno, n, pos;
 
+		// Get the block
+		blockno = ospfs_inode_blockno(oi, *f_pos);
 		if (blockno == 0) {
 			retval = -EIO;
 			goto done;
 		}
 
-		data = ospfs_block(blockno);
+		// Get the block number
+		blocknos[blocks_stored] = blockno;
+
+		// Copy to buffer
+		memcpy(data_buf, ospfs_block(blockno), OSPFS_BLKSIZE);
 		// Get to the right position in the block - is this right?
-		data += (*f_pos % OSPFS_BLKSIZE);
+		pos = (*f_pos % OSPFS_BLKSIZE);
 		
 		// Figure out how much data is left in this block to write.
 		// Copy data from user space. Return -EFAULT if unable to read
 		// read user space.
 		// Keep track of the number of bytes moved in 'n'.
-		/* EXERCISE: Your code here */
 
 		// Go only to the end of a block, or the end of the read if before that
-		n = MIN(OSPFS_BLKSIZE - (*f_pos % OSPFS_BLKSIZE), (count - amount));
+		n = MIN(OSPFS_BLKSIZE - pos, (count - amount));
 
 		if(n == 0)
 			goto done;
 
-		retval = copy_from_user(data, buffer, n);
+		retval = copy_from_user((data_buf + pos), buffer, n);
 		
 		if(retval != 0) {
 			retval = -EFAULT;
 			goto done;
 		}
 
+		// Write to the journal blocks_stored
+		memcpy(ospfs_block(ospfs_super->os_firstjournalb + 
+			JOURNAL_DATA_BLOCKS_POS + blocks_stored), data_buf, OSPFS_BLKSIZE);
+		blocks_stored++;
+		if(blocks_stored == JOURNAL_MAX_BLOCKS) {
+			// Data blocks full, execute journal
+			write_to_journal(&header, blocknos, &blocks_stored);
+			execute_journal();
+			restart_write_journal(&header, blocknos, &blocks_stored);
+		}
+
+		// Increment the position
 		buffer += n;
 		amount += n;
 		*f_pos += n;
+	}
+
+	if(0 < blocks_stored) {
+		// Data blocks need to be written, execute journal
+		write_to_journal(&header, blocknos, &blocks_stored);
+		execute_journal();
 	}
 
     done:
