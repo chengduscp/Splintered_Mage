@@ -758,284 +758,6 @@ void print_super() {
 	eprintk("Super firstdatab: %d\n", ospfs_super->os_firstdatab);
 }
 
-
-// add_block(ospfs_inode_t *oi)
-//   Adds a single data block to a file, adding indirect and
-//   doubly-indirect blocks if necessary. (Helper function for
-//   change_size).
-//
-// Inputs: oi -- pointer to the file we want to grow
-// Returns: 0 if successful, < 0 on error.  Specifically:
-//          -ENOSPC if you are unable to allocate a block
-//          due to the disk being full or
-//          -EIO for any other error.
-//          If the function is successful, then oi->oi_size
-//          should be set to the maximum file size in bytes that could
-//          fit in oi's data blocks.  If the function returns an error,
-//          then oi->oi_size should remain unchanged. Any newly
-//          allocated blocks should be erased (set to zero).
-//
-// EXERCISE: Finish off this function.
-//
-// Remember that allocating a new data block may require allocating
-// as many as three disk blocks, depending on whether a new indirect
-// block and/or a new indirect^2 block is required. If the function
-// fails with -ENOSPC or -EIO, then you need to make sure that you
-// free any indirect (or indirect^2) blocks you may have allocated!
-//
-// Also, make sure you:
-//  1) zero out any new blocks that you allocate
-//  2) store the disk block number of any newly allocated block
-//     in the appropriate place in the inode or one of the
-//     indirect blocks.
-//  3) update the oi->oi_size field
-
-// old add block  which actually works
-static int
-add_block(ospfs_inode_t *oi)
-{
-	// Indirect and Indirect2 lists
-	uint32_t * block_list;
-	uint32_t * indirect_block_list;
-	
-	// current number of blocks in file
-	uint32_t n = ospfs_size2nblocks(oi->oi_size);
-
-	// keep track of allocations to free in case of -ENOSPC
-	uint32_t allocate[3] = { 0, 0, 0 };
-
-	// Allocate and prepare the data block
-	allocate[0] = allocate_block();
-	if(!allocate[0]) {
-		return -ENOSPC;
-	}
-	memset(ospfs_block(allocate[0]), 0, OSPFS_BLKSIZE);
-
-	// In direct block range
-	if(0 <= n && n < OSPFS_NDIRECT) {
-		oi->oi_direct[n] = allocate[0];
-	}
-	// Check if starting indirect block
-	else if(n == OSPFS_NDIRECT) {
-		// Allocate and prepare the indirect block
-		allocate[1] = allocate_block();
-		if(!allocate[1]) {
-			free_block(allocate[0]);
-			return -ENOSPC;
-		}
-		memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
-
-		// Set the first element of the indirect block
-		oi->oi_indirect = allocate[1];
-		block_list = ospfs_block(oi->oi_indirect);
-		block_list[0] = allocate[0];
-	}
-	// Add to indirect block
-	else if(n < OSPFS_NDIRECT + OSPFS_NINDIRECT) {
-		// Add the to the end of the list
-		block_list = ospfs_block(oi->oi_indirect);
-		block_list[(n - OSPFS_NDIRECT)] = allocate[0];
-	}
-	// Check if we need to allocate the indirect2 block
-	else if(n == OSPFS_NDIRECT + OSPFS_NINDIRECT) {
-		// Allocate the indirect2 block
-		allocate[1] = allocate_block();
-		if(!allocate[1]) {
-			free_block(allocate[0]);
-			return -ENOSPC;
-		}
-
-		// Allocate the indirect block
-		allocate[2] = allocate_block();
-		if(!allocate[2]) {
-			free_block(allocate[0]);
-			free_block(allocate[1]);
-			return -ENOSPC;
-		}
-		
-		// Prepare the blocks
-		memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
-		memset(ospfs_block(allocate[2]), 0, OSPFS_BLKSIZE);
-
-		// Set the new indirect block and its first indirect and data block
-		oi->oi_indirect2 = allocate[0];
-		indirect_block_list = ospfs_block(oi->oi_indirect2);
-
-		indirect_block_list[0] = allocate[1];
-		block_list = ospfs_block(indirect_block_list[0]);
-		block_list[0] = allocate[2];
-	}
-	// See if we are still in the allowed file size
-	else if(n < OSPFS_MAXFILEBLKS) {
-		int indirect_index, direct_index;
-		// Get the indirect2 list
-		indirect_block_list = ospfs_block(oi->oi_indirect2);
-		
-		// Check if we need to allocate a new indirect block
-		indirect_index = (n - OSPFS_NDIRECT - OSPFS_NINDIRECT) / OSPFS_NINDIRECT;
-		if(indirect_block_list[indirect_index] == 0) {
-			// Allocate the new indirect block and prepare it
-			allocate[1] = allocate_block();
-			if(!allocate[1]) {
-				free_block(allocate[0]);
-				return -ENOSPC;
-			}
-			memset(ospfs_block(allocate[1]), 0, OSPFS_BLKSIZE);
-
-			// Add the new indirect block to the list
-			indirect_block_list[indirect_index] = allocate[1];	
-		}
-
-		// Get the direct block list from the indirect block
-		block_list = ospfs_block(indirect_block_list[indirect_index]);
-
-		// Add the new data block
-		direct_index = (n - OSPFS_NDIRECT - OSPFS_NINDIRECT) % OSPFS_NINDIRECT;
-		block_list[direct_index] = allocate[0];
-	}
-	// No more blocks...
-	else {
-		free_block(allocate[0]);
-		return -EIO;
-	}
-
-	/* EXERCISE: Your code here */
-	oi->oi_size = (n+1)*OSPFS_BLKSIZE;
-	return 0; // Replace this line
-}
-
-// remove_block(ospfs_inode_t *oi)
-//   Removes a single data block from the end of a file, freeing
-//   any indirect and indirect^2 blocks that are no
-//   longer needed. (Helper function for change_size)
-//
-// Inputs: oi -- pointer to the file we want to shrink
-// Returns: 0 if successful, < 0 on error.
-//          If the function is successful, then oi->oi_size
-//          should be set to the maximum file size that could
-//          fit in oi's blocks.  If the function returns -EIO (for
-//          instance if an indirect block that should be there isn't),
-//          then oi->oi_size should remain unchanged.
-//
-// EXERCISE: Finish off this function.
-//
-// Remember that you must free any indirect and doubly-indirect blocks
-// that are no longer necessary after shrinking the file.  Removing a
-// single data block could result in as many as 3 disk blocks being
-// deallocated.  Also, if you free a block, make sure that
-// you set the block pointer to 0.  Don't leave pointers to
-// deallocated blocks laying around!
-
-static int
-remove_block(ospfs_inode_t *oi)
-{
-	// Indirect and Indirect2 lists
-	uint32_t * block_list;
-	uint32_t * indirect_block_list;
-
-	// current number of blocks in file
-	uint32_t n = ospfs_size2nblocks(oi->oi_size);
-
-	// Check if the file has any allocated storage
-	if(n == 0)
-		return 0;
-
-	// Deallocate from the direct block range
-	if(0 < n && n <= OSPFS_NDIRECT) {
-		free_block(oi->oi_direct[n - 1]);
-		oi->oi_direct[n - 1] = 0;
-	}
-	// Deallocate from the indirect block
-	else if(n <= OSPFS_NDIRECT + OSPFS_NINDIRECT) {
-		// Check for the indirect block
-		if(oi->oi_indirect == 0) {
-			return -EIO;
-		}
-
-		block_list = ospfs_block(oi->oi_indirect);
-		if(block_list[n - 1 - OSPFS_NDIRECT] == 0) {
-			return -EIO;
-		}
-
-		// Free the data block
-		free_block(block_list[n - 1 - OSPFS_NDIRECT]);
-		block_list[n - 1 - OSPFS_NDIRECT] = 0;
-
-		// Check if we need to free the indirect block
-		if(n - OSPFS_NDIRECT == 0) {
-			free_block(oi->oi_indirect);
-			oi->oi_indirect = 0;
-		}
-
-	}
-	// Deallocate from the indirect2 block range
-	else if(n <= OSPFS_MAXFILEBLKS) {
-		int blockoff, indirect_index, direct_index;
-
-		// Make sure we have the indirect2 list
-		if(oi->oi_indirect2 == 0) {
-			return -EIO;
-		}
-
-		// Get the indirect2 list
-		indirect_block_list = ospfs_block(oi->oi_indirect2);
-
-		// Check that we have the indirect block
-
-		blockoff = n - 1 - OSPFS_NDIRECT - OSPFS_NINDIRECT;
-		indirect_index = (blockoff / OSPFS_NINDIRECT);
-		if(indirect_block_list[indirect_index] == 0) {
-			return -EIO;
-		}
-
-		// Get the indirect list
-		block_list = ospfs_block(indirect_block_list[indirect_index]);
-		// Check that we have the direct block
-		direct_index = (blockoff % OSPFS_NINDIRECT);
-		if(block_list[direct_index] == 0) {
-			return -EIO;
-		}
-
-		// Free the block(s)
-		free_block(block_list[direct_index]);
-		block_list[direct_index] = 0;
-
-		// Check if we need to free the indirect block
-		if(direct_index == 0) {
-			free_block(indirect_block_list[indirect_index]);
-			indirect_block_list[indirect_index] = 0;
-		}
-
-		// Now check if we need to free indirect2 block
-		if(direct_index == 0 && indirect_index == 0) {
-			free_block(oi->oi_indirect2);
-			oi->oi_indirect2 = 0;
-		}
-	}
-	// Don't know what is going on if we get here...
-	else {
-		return -EIO;
-	}
-
-	/* EXERCISE: Your code here */
-	oi->oi_size = (n-1)*OSPFS_BLKSIZE;
-	return 0; // Replace this line
-}
-
-// TOTAL RESTART
-
-
-
-
-/*
-typedef struct file_index_struct {
-	uint32_t * blk_list;
-	uint32_t * indir_blk_list;
-	uint32_t blk_size;
-	int indir2_idx, indir_idx, dir_idx;
-} file_index_t;
-*/
-
 // Prepares a resize_request for a file resize. Works regardless of increasing 
 // or decreasing file size. Initializes the resize_request based on the 
 // current size of the request
@@ -1180,6 +902,17 @@ add_block_file(ospfs_inode_t *oi, resize_request *r)
 
 	// Check if we need to allocate the doubly indirect block
 	if(idx->indir2_idx == 0 && idx->indir_idx == 0 && idx->dir_idx == 0) {
+		// Notify that we allocated the doubly indirect block
+		r->resize_type |= JOURNAL_RESIZE_INDIRECT2;
+
+		// Check that we are the first on
+		// If we do this when we are not the first block, we may over-ride the 
+		//  existing indirect block
+		if(r->n != 0) {
+			r->blocknos[r->n] = 0;
+			return 0;
+		}
+
 		// Allocate a new block for the doubly indirect block
 		r->indirect2_blockno = 
 			find_free_block(r->lower_bound, r->upper_bound);
@@ -1189,13 +922,23 @@ add_block_file(ospfs_inode_t *oi, resize_request *r)
 			return -ENOSPC;
 		update_bounds(r, r->indirect2_blockno);
 
-		// Change the inode and notify that we allocated the indir2
+		// Change the inode
 		oi->oi_indirect2 = r->indirect2_blockno;
-		r->resize_type |= JOURNAL_RESIZE_INDIRECT2;
 	}
 
 	// Check if we need to do the indirect block
-	if(idx->indir_idx == 0 && idx->dir_idx == 0) {
+	if(idx->indir_idx >= 0 && idx->dir_idx == 0) {
+		// Notify that we need to allocate the indirect block
+		r->resize_type |= JOURNAL_RESIZE_INDIRECT;
+
+		// Check that we are the first on
+		// If we do this when we are not the first block, we may over-ride the 
+		//  existing indirect block
+		if(r->n != 0) {
+			r->blocknos[r->n] = 0;
+			return 0;
+		}
+
 		// Allocate a new block for the indirect block
 		r->indirect_blockno = 
 			find_free_block(r->lower_bound, r->upper_bound);
@@ -1213,9 +956,6 @@ add_block_file(ospfs_inode_t *oi, resize_request *r)
 		else { // In indirect block range
 			oi->oi_indirect = r->indirect_blockno;
 		}
-
-		// Tell the resize request that we are freeing the indirect block
-		r->resize_type |= JOURNAL_RESIZE_INDIRECT;
 	}
 
 	// Change the inode to match the new size
@@ -1276,8 +1016,9 @@ change_size_to_journal(journal_header_t *header, resize_request *r)
 	return 0;
 }
 
+// Executes the journal based on whatever is in its header currently
 int
-execute_journal()
+execute_journal(void)
 {
 	int i;
 	journal_header_t *journal_header;
@@ -1304,6 +1045,8 @@ execute_journal()
 
 	// Check what kind of execution we are doing
 	if(journal_header->execute_type == JOURNAL_FREE) {
+		// Copy over the inode
+		*oi = journal_header->inode;
 
 		// Syncronize the doubly indirect block
 		if(journal_header->file_resize_type & JOURNAL_RESIZE_INDIRECT2) {
@@ -1328,12 +1071,14 @@ execute_journal()
 			free_block(blocknos[i]);
 		}
 
-		// Copy over the inode
-		*oi = journal_header->inode;
 	}
 	else if(journal_header->execute_type == JOURNAL_ALLOC) {
 
 		// eprintk("Blocks affected: %d\n", journal_header->n_blocks_affected);
+		// Copy over the inode
+		*oi = journal_header->inode;
+		// eprintk("Increasing size of inode %d\n",
+		// 				journal_header->inode_num);
 
 		// Free the data blocks
 		for(i = 0; i < journal_header->n_blocks_affected; i++) {
@@ -1365,10 +1110,6 @@ execute_journal()
 			// eprintk("Writing to indirect2 block...\n");
 		}
 
-		// Copy over the inode
-		*oi = journal_header->inode;
-		// eprintk("Increasing size of inode %d\n",
-		// 				journal_header->inode_num);
 	}
 
 	// Done our tasks, now empty the journal
@@ -1377,7 +1118,7 @@ execute_journal()
 }
 
 // Freeing memory of inode_num to size new_size
-int
+static int
 free_memory(uint32_t inode_num, uint32_t new_size)
 {
 	int error; // error codes
@@ -1439,6 +1180,62 @@ free_memory(uint32_t inode_num, uint32_t new_size)
 	return 0;
 }
 
+static int
+grow_size(uint32_t inode_num, uint32_t new_size)
+{
+	int error; // error codes
+	uint32_t desired_size;
+	journal_header_t header;
+	ospfs_inode_t *oi;
+	resize_request r; // To keep track of what we have to do
+
+	// Get the inode
+	oi = ospfs_inode(inode_num);
+
+	memset(&header, 0, sizeof(journal_header_t));
+	header.inode = *oi; // make copy of inode
+	header.inode_num = inode_num;
+	header.execute_type = JOURNAL_ALLOC; // Freeing memory
+
+	desired_size = ospfs_size2nblocks(new_size);
+	while(header.inode.oi_size < new_size) {
+		// Initialize the change size request
+		error = init_resize_request(&header.inode, &r);
+		if(error < 0) {
+			break;
+		}
+
+		while(r.n < JOURNAL_MAX_BLOCKS && // only can do 256 blocks at once
+				ospfs_size2nblocks(header.inode.oi_size) < desired_size) {
+			error = add_block_file(&header.inode, &r);
+			if(error < 0) {
+				return error;
+			}
+			// Check to see if we hit an edge of a indirect block
+			if(r.resize_type & JOURNAL_RESIZE_INDIRECT ||
+				r.resize_type & JOURNAL_RESIZE_INDIRECT2) {
+				break;
+			}
+		}
+		// Change the size if appropriate
+		if(ospfs_size2nblocks(header.inode.oi_size) >= desired_size) {
+			header.inode.oi_size = new_size;
+		}
+
+		// Write out information to journal
+		error = change_size_to_journal(&header, &r);
+		if(error < 0)
+			return error;
+
+		// Execute the journal
+		error = execute_journal();
+		if(error < 0)
+			return error;
+	}
+
+	return 0;
+}
+
 
 // change_size(oi, want_size)
 //	Use this function to change a file's size, allocating and freeing
@@ -1479,103 +1276,22 @@ free_memory(uint32_t inode_num, uint32_t new_size)
 static int
 change_size(ospfs_inode_t *oi, uint32_t inode_num, uint32_t new_size)
 {
-int i;
-	int error; // error codes
-	uint32_t desired_size;
-	uint32_t old_size = oi->oi_size;
 	int r = 0, retval = 0;
-
-	error = 0;
 
 	// Simple check to make sure we don't try to go over the file size limit
 	if(OSPFS_MAXFILESIZE < new_size)
 		return -ENOSPC;
 
-	journal_header_t header;
-	memset(&header, 0, sizeof(journal_header_t));
-	header.inode = *oi; // make copy of inode
-	header.inode_num = inode_num;
-	
-	desired_size = ospfs_size2nblocks(new_size);
-	if(new_size < header.inode.oi_size) {
+	if(new_size < oi->oi_size) {
 		return free_memory(inode_num, new_size);
 	}
 	// still working on this...
-	else if(header.inode.oi_size < new_size) { 
-		header.execute_type = JOURNAL_ALLOC; // Freeing memory
-		resize_request r; // To keep track of what we have to do
-
-		while(header.inode.oi_size < new_size) {
-			// Initialize the change size request
-			error = init_resize_request(&header.inode, &r);
-			if(error < 0) {
-				break;
-			}
-
-			while(r.n < JOURNAL_MAX_BLOCKS && // only can do 256 blocks at once
-					ospfs_size2nblocks(header.inode.oi_size) < desired_size) {
-				error = add_block_file(&header.inode, &r);
-				if(error < 0) {
-					break;
-				}
-				// Check to see if we hit an edge of a indirect block
-				if(r.resize_type & JOURNAL_RESIZE_INDIRECT) {
-					break;
-				}
-			}
-
-			if(error < 0)
-				break;
-
-			if(ospfs_size2nblocks(header.inode.oi_size) >= desired_size) {
-				header.inode.oi_size = new_size;
-			}
-
-			error = change_size_to_journal(&header, &r);
-			if(error < 0)
-				return error;
-
-			// Execute the journal
-			error = execute_journal();
-			if(error < 0)
-				return error;
-
-
-			// Write out information to journal
-			/*
-
-			*/
-			// eprintk("session ended %d %d\n", oi->oi_size, header.inode.oi_size);
-		}
-
-		return 0;
+	else if(oi->oi_size < new_size) { 
+		return grow_size(inode_num, new_size);
 	}
 
-	return error;
-
-	while (ospfs_size2nblocks(oi->oi_size) < ospfs_size2nblocks(new_size)) {
-        /* EXERCISE: Your code here */
-		r = add_block(oi);
-		if(r < 0) {
-			retval = r;
-			break;
-		}
-	}
-	if(r != 0) {
-		new_size = old_size;
-	}
-	while (ospfs_size2nblocks(oi->oi_size) > ospfs_size2nblocks(new_size)) {
-        /* EXERCISE: Your code here */
-        r = remove_block(oi);
-		if(r < 0) {
-			return r;
-		}
-	}
-
-	/* EXERCISE: Make sure you update necessary file meta data
-	             and return the proper value. */
-	oi->oi_size = new_size;
-	return retval;
+	// Don't have to change its size
+	return 0;
 }
 
 
