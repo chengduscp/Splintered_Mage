@@ -531,61 +531,6 @@ ospfs_dir_readdir(struct file *filp, void *dirent, filldir_t filldir)
 }
 
 
-// ospfs_unlink(dirino, dentry)
-//   This function is called to remove a file.
-//
-//   Inputs: dirino  -- You may ignore this.
-//           dentry  -- The 'struct dentry' structure, which contains the inode
-//                      the directory entry points to and the directory entry's
-//                      directory.
-//
-//   Returns: 0 if success and -ENOENT on entry not found.
-//
-//   EXERCISE: Make sure that deleting symbolic links works correctly.
-
-static int
-ospfs_unlink(struct inode *dirino, struct dentry *dentry)
-{
-	ospfs_inode_t *oi = ospfs_inode(dentry->d_inode->i_ino);
-	ospfs_inode_t *dir_oi = ospfs_inode(dentry->d_parent->d_inode->i_ino);
-	int entry_off;
-	ospfs_direntry_t *od;
-	od = NULL; // silence compiler warning; entry_off indicates when !od
-	for (entry_off = 0; entry_off < dir_oi->oi_size;
-	     entry_off += OSPFS_DIRENTRY_SIZE) {
-		od = ospfs_inode_data(dir_oi, entry_off);
-		if (od->od_ino > 0
-		    && strlen(od->od_name) == dentry->d_name.len
-		    && memcmp(od->od_name, dentry->d_name.name, dentry->d_name.len) == 0)
-			break;
-	}
-
-	if (entry_off == dir_oi->oi_size) {
-		printk("<1>ospfs_unlink should not fail!\n");
-		return -ENOENT;
-	}
-
-
-	od->od_ino = 0;
-	oi->oi_nlink--;
-
-	// Check for symlinks
-	if(oi->oi_ftype == OSPFS_FTYPE_SYMLINK) {
-		memset(oi, 0, sizeof(ospfs_symlink_inode_t));
-		return 0;
-	}
-
-	// Check if we can free the blocks
-	if(oi->oi_nlink == 0) {
-
-		change_size(oi, dentry->d_inode->i_ino, 0);
-	}
-
-	return 0;
-}
-
-
-
 /*****************************************************************************
  * FREE-BLOCK BITMAP OPERATIONS
  *
@@ -1120,7 +1065,8 @@ execute_journal(void)
 		}
 	}
 	else if(journal_header->execute_type == JOURNAL_HRDLNK
-		|| journal_header->execute_type == JOURNAL_CREATE) {
+		|| journal_header->execute_type == JOURNAL_CREATE
+		|| journal_header->execute_type == JOURNAL_SYMLNK) {
 		// Copy over inode
 		*oi = journal_header->inode;
 
@@ -1128,6 +1074,16 @@ execute_journal(void)
 		memcpy(ospfs_block(journal_header->dir_data_blockno), 
 			ospfs_block(ospfs_super->os_firstjournalb + 
 				JOURNAL_DATA_BLOCKS_POS), OSPFS_BLKSIZE);
+	}
+	else if(journal_header->execute_type == JOURNAL_UNLNK) {
+		// Copy over inode
+		*oi = journal_header->inode;
+
+		// Copy over the directory data block
+		memcpy(ospfs_block(journal_header->dir_data_blockno), 
+			ospfs_block(ospfs_super->os_firstjournalb + 
+				JOURNAL_DATA_BLOCKS_POS), OSPFS_BLKSIZE);
+	
 	}
 
 	// Done our tasks, now empty the journal
@@ -1157,6 +1113,168 @@ check_journal(void)
 
 	// The journal was not complete!! Execute now
 	return execute_journal();
+}
+
+// ospfs_unlink(dirino, dentry)
+//   This function is called to remove a file.
+//
+//   Inputs: dirino  -- You may ignore this.
+//           dentry  -- The 'struct dentry' structure, which contains the inode
+//                      the directory entry points to and the directory entry's
+//                      directory.
+//
+//   Returns: 0 if success and -ENOENT on entry not found.
+//
+//   EXERCISE: Make sure that deleting symbolic links works correctly.
+/*
+	blocks_size = ospfs_size2nblocks(dir_oi->oi_size);
+	for(blockno = 0; blockno < blocks_size; blockno++) {
+		direntry_list = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
+		
+		// Loop through all the entries, see if any have inode number 0
+		for(direntry_no = 0; direntry_no < direntries_per_block; direntry_no++) {
+			if(direntry_list[direntry_no].od_ino == 0) {
+				*offset = direntry_no;
+				blank_found = 1;
+				return blockno;
+			}
+		}
+	}
+
+*/
+static int
+ospfs_unlink(struct inode *dirino, struct dentry *dentry)
+{
+	journal_header_t unlink_header, *journal_header;
+	ospfs_direntry_t direntries[(OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE)];
+	uint32_t blocksize, journal_block_pos, *journal_block;
+	ospfs_direntry_t *direntries_in_block, *direntry;
+	ospfs_inode_t *oi = ospfs_inode(dentry->d_inode->i_ino);
+	ospfs_inode_t *dir_oi = ospfs_inode(dentry->d_parent->d_inode->i_ino);
+	int blockno, dirno, found;
+	ospfs_direntry_t *od;
+	uint32_t direntry_index = 0;
+	uint32_t direntries_per_block = OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE;
+	blocksize = dir_oi->oi_size;
+	found = 0;
+	od = NULL; // silence compiler warning; entry_off indicates when !od
+
+
+	for (blockno = 0; blockno < blocksize; blockno++) {
+		od = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
+
+		// Loop through all the entries in the block and find the correct entry
+		for(dirno = 0; dirno < direntries_per_block; dirno++) {
+			if (od[dirno].od_ino > 0
+		    	&& strlen(od[dirno].od_name) == dentry->d_name.len
+		    	&& memcmp(od[dirno].od_name, dentry->d_name.name, dentry->d_name.len) == 0) {
+		    	direntry_index = dirno;
+		    	found = 1;
+		    	//eprintk("Found! \n");
+				break;
+			}
+		}
+
+		if(found == 1)
+			break;
+	}
+
+	if (found == 0) {
+		printk("<1>ospfs_unlink should not fail!\n");
+		return -ENOENT;
+	}
+
+	// Write relevant journal header information
+	unlink_header.execute_type = JOURNAL_UNLNK;
+	unlink_header.inode_num = dentry->d_inode->i_ino;
+	unlink_header.inode = *oi;
+
+	// Locate which block the direntry that is being unlinked is and record in journal
+	unlink_header.dir_data_blockno = ospfs_inode_blockno(dir_oi, blockno * OSPFS_BLKSIZE);
+
+	eprintk("Targeted File: %s \n", dentry->d_name.name);
+	//eprintk("Entry Off: %d \n", entry_off);
+	
+	// Copy All Directory Entries in the block that has the
+	// target Directory Entry and copy it to the local buffer
+	direntries_in_block = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
+
+	//DEBUGGING
+	int b; 
+	ospfs_direntry_t *debuggingdirentries;
+	debuggingdirentries = direntries_in_block;
+	eprintk("This is the 1st Loop checking direntries in block!\n");
+	for(b = 0; b < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE; b++)
+	{
+		eprintk("%d %s, ", debuggingdirentries[b].od_ino, debuggingdirentries[b].od_name);
+	}
+	eprintk("\n");
+
+	memcpy(direntries, direntries_in_block, OSPFS_BLKSIZE);
+	eprintk("Direntry_index: %d \n", direntry_index);
+	direntry = &direntries[direntry_index];
+
+		// DEBUGGING
+	debuggingdirentries = direntries;
+	eprintk("This is the 2nd Loop checking direntries (before memcpy)! \n");
+	for(b = 0; b < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE; b++)
+	{
+		eprintk("%d %d %s, ", b, debuggingdirentries[b].od_ino, debuggingdirentries[b].od_name);
+	}
+	eprintk("\n");
+
+	eprintk("This is the Direntry pointed at by direntry: %d %s \n", direntry->od_ino, direntry->od_name);
+
+
+	//memset(direntry, 0, sizeof(ospfs_direntry_t));
+	direntry->od_ino = 0;
+	unlink_header.inode.oi_nlink--;
+
+	// Check for symlinks
+	if(unlink_header.inode.oi_ftype == OSPFS_FTYPE_SYMLINK) {
+		memset(&unlink_header.inode, 0, sizeof(ospfs_symlink_inode_t));
+	}
+	
+	// DEBUGGING
+	debuggingdirentries = direntries;
+	eprintk("This is the 3nd Loop checking direntries again (after inode change)! \n");
+	for(b = 0; b < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE; b++)
+	{
+		eprintk("%d %d %s, ", b, debuggingdirentries[b].od_ino, debuggingdirentries[b].od_name);
+	}
+	eprintk("\n");
+
+	// Copy direntry buffer into journal data block
+	journal_block_pos = ospfs_super->os_firstjournalb + JOURNAL_DATA_BLOCKS_POS;
+	journal_block = ospfs_block(journal_block_pos);
+	memcpy(journal_block, direntries, OSPFS_BLKSIZE);
+
+	// Copy Header Information into Journal Header
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS),
+		 &unlink_header, sizeof(journal_header_t));
+
+	// Update Journal Header Completion Flag
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	journal_header->completed = 1;
+	
+	execute_journal();
+
+	// Check if we can free the blocks
+	if(unlink_header.inode.oi_nlink == 0) {
+		change_size(&unlink_header.inode, unlink_header.inode_num, 0);
+	}
+	/*
+	*/
+
+
+/*	// Check if we can free the blocks
+	if(oi->oi_nlink == 0) {
+
+		change_size(oi, dentry->d_inode->i_ino, 0);
+	}*/
+
+	return 0;
 }
 
 // Freeing memory of inode_num to size new_size
@@ -1654,86 +1772,7 @@ find_direntry(ospfs_inode_t *dir_oi, const char *name, int namelen)
 	return 0;
 }
 
-
-// create_blank_direntry(dir_oi)
-//	'dir_oi' is an OSP inode for a directory.
-//	Return a blank directory entry in that directory.  This might require
-//	adding a new block to the directory.  Returns an error pointer (see
-//	below) on failure.
-//
-// ERROR POINTERS: The Linux kernel uses a special convention for returning
-// error values in the form of pointers.  Here's how it works.
-//	- ERR_PTR(errno): Creates a pointer value corresponding to an error.
-//	- IS_ERR(ptr): Returns true iff 'ptr' is an error value.
-//	- PTR_ERR(ptr): Returns the error value for an error pointer.
-//	For example:
-//
-//	static ospfs_direntry_t *create_blank_direntry(...) {
-//		return ERR_PTR(-ENOSPC);
-//	}
-//	static int ospfs_create(...) {
-//		...
-//		ospfs_direntry_t *od = create_blank_direntry(...);
-//		if (IS_ERR(od))
-//			return PTR_ERR(od);
-//		...
-//	}
-//
-//	The create_blank_direntry function should use this convention.
-//
-// EXERCISE: Write this function.
-
-static ospfs_direntry_t *
-create_blank_direntry(ospfs_inode_t *dir_oi, ino_t inode_num)
-{
-	// Outline:
-	// 1. Check the existing directory data for an empty entry.  Return one
-	//    if you find it.
-	// 2. If there's no empty entries, add a block to the directory.
-	//    Use ERR_PTR if this fails; otherwise, clear out all the directory
-	//    entries and return one of them.
-	int blockno, dirno;
-	ospfs_direntry_t *direntry_list = 0, *direntry = 0;
-	const uint32_t direntries_per_block = (OSPFS_BLKSIZE / OSPFS_DIRENTRY_SIZE);
-
-	// Go through the whole directory to see if there are any free blocks
-	uint32_t blocks_size = ospfs_size2nblocks(dir_oi->oi_size);
-	for(blockno = 0; blockno < blocks_size; blockno++) {
-		direntry_list = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
-		
-		// Loop through all the entries, see if any have inode number 0
-		for(dirno = 0; dirno < direntries_per_block; dirno++) {
-			if(direntry_list[dirno].od_ino == 0) {
-				direntry = &direntry_list[dirno];
-				break;
-			}
-		}
-		// See if we found a direntry
-		if(direntry != 0)
-			break;
-	}
-	// See if we found any blank direntries
-	if(direntry == 0) {
-		// Check to see if we can add a new block to the directory
-		int error = change_size(dir_oi, inode_num ,dir_oi->oi_size + OSPFS_BLKSIZE);
-		if(error < 0)
-			ERR_PTR(-ENOSPC);
-
-		// Clear the memory and set the direntry pointer to the first direntry
-		//  in the new block, found by the new dir_oi size
-		direntry_list =
-			ospfs_inode_data(
-				dir_oi,
-				(ospfs_size2nblocks(dir_oi->oi_size)) * OSPFS_BLKSIZE
-			);
-		memset(direntry_list, 0, OSPFS_BLKSIZE);
-
-		direntry = &direntry_list[0];
-	}
-
-	// In the clear, now return the new direntry
-	return direntry;
-}
+// Returns blockno offset of directory where the  blank direntry spot was found
 
 static int
 find_blank_direntry(ospfs_inode_t *dir_oi, uint32_t *offset, ino_t inode_num) {
@@ -1873,7 +1912,6 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 	strncpy(direntry->od_name, dst_dentry->d_name.name, dst_dentry->d_name.len);
 	direntry->od_ino = link_header.inode_num;
 	link_header.inode.oi_nlink++;
-	//link_inode->oi_nlink++;
 
 	// Record direntry block into the journal's data block
 	journal_block_pos = ospfs_super->os_firstjournalb + JOURNAL_DATA_BLOCKS_POS;
@@ -2043,11 +2081,17 @@ static int
 ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 {
 	int len, i;
+	journal_header_t symlink_header, *journal_header;
+	uint32_t journal_block_pos, *journal_block;
 	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
 	ospfs_symlink_inode_t *symlink = 0;
 	ospfs_inode_t *inodes = ospfs_block(ospfs_super->os_firstinob);
+	ospfs_direntry_t *direntry_list;
+	ospfs_direntry_t direntries[(OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE)];
 	ospfs_direntry_t *direntry = 0;
 	uint32_t entry_ino = 0;
+	uint32_t direntry_blockno = 0;
+	uint32_t offset = 0;
 
 	if(OSPFS_MAXNAMELEN < dentry->d_name.len) {
 		return -ENAMETOOLONG;
@@ -2063,11 +2107,6 @@ ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 	if(OSPFS_MAXSYMLINKLEN < len) {
 		return -ENAMETOOLONG;
 	}
-
-	// Get a new direntry
-	direntry = create_blank_direntry(dir_oi, dir->i_ino);
-	if(IS_ERR(direntry))
-		return PTR_ERR(direntry);
 
 	// Find an open inode
 	for(i = 0; i < ospfs_super->os_ninodes; i++) {
@@ -2105,10 +2144,55 @@ ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 		symlink->oi_symlink[i] = '\0';
 	}
 
-	// Finish making the direntry
+	// Fill out Journal Information
+	symlink_header.execute_type = JOURNAL_SYMLNK;
+	symlink_header.inode_num = entry_ino;
+	symlink_header.inode = *ospfs_inode(entry_ino);
+	symlink_header.n_blocks_affected = 1;
+
+	// Find a blank direntry for the symlink to reside in and return the block
+	direntry_blockno = find_blank_direntry(dir_oi, &offset, dir->i_ino);
+	symlink_header.dir_data_blockno = ospfs_inode_blockno(dir_oi, direntry_blockno * OSPFS_BLKSIZE);
+	
+	// Copy contents of the block with the blank direntry into our "buffer" (array of direntries)
+	direntry_list = ospfs_inode_data(dir_oi, direntry_blockno *OSPFS_BLKSIZE);
+	memcpy(direntries, direntry_list, OSPFS_BLKSIZE);
+
+	// Set empty direntry to be the symlink direntry
+	direntry = &direntries[offset];
+	
+	// Finish making direntry in buffer
 	direntry->od_ino = entry_ino;
 	strncpy(direntry->od_name, dentry->d_name.name, dentry->d_name.len);
 	direntry->od_name[dentry->d_name.len] = '\0';
+
+	// Copy direntry buffer into journal data block
+	journal_block_pos = ospfs_super->os_firstjournalb + JOURNAL_DATA_BLOCKS_POS;
+	journal_block = ospfs_block(journal_block_pos);
+	memcpy(journal_block, direntries, OSPFS_BLKSIZE);
+	
+	// Copy Header Information into Journal Header
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS),
+		 &symlink_header, sizeof(journal_header_t));
+
+	// Update Journal Header Completion Flag
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	journal_header->completed = 1;
+	
+	execute_journal();
+
+	//For Debugging
+	/*int b; 
+	ospfs_direntry_t *debuggingdirentries;
+	debuggingdirentries = direntries;
+	for(b = 0; b < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE; b++)
+	{
+		eprintk("%d %s, ", debuggingdirentries[b].od_ino, debuggingdirentries[b].od_name);
+	}
+	eprintk("\n");*/
+
+	// 
 
 	/* Execute this code after your function has successfully created the
 	   file.  Set entry_ino to the created file's inode number before

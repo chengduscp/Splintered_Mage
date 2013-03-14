@@ -132,7 +132,8 @@ close FOO;
 
     # 22
     # write files, remove them, then read dir again
-    [ 'ls test | dd bs=1 of=test/dir-contents.txt >/dev/null 2>&1; ' .
+    [ 'touch test/dir-contents.txt && ' .
+      'ls test | dd bs=1 of=test/dir-contents.txt >/dev/null 2>&1; ' .
       ' touch test/foo test/bar test/baz && '.
       ' rm    test/foo test/bar test/baz && '.
       'diff <( ls test ) test/dir-contents.txt',

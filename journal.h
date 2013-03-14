@@ -11,6 +11,7 @@
 #define JOURNAL_SYMLNK 4
 #define JOURNAL_HRDLNK 5
 #define JOURNAL_CREATE 6
+#define JOURNAL_UNLNK  7
 
 // Journal sizes
 #define JOURNAL_HEADER_SIZE        1
