@@ -1136,6 +1136,29 @@ execute_journal(void)
 	return 0;
 }
 
+// Check if the journal is empty
+int
+check_journal(void)
+{
+	journal_header_t *journal_header;
+
+	// Set the completed journal flag
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	// Check if the journal is free
+	if(journal_header->execute_type == JOURNAL_FREE)
+		return 0;
+
+	// Check that the journal is completed
+	if(journal_header->completed == 0) {
+		journal_header->execute_type = JOURNAL_FREE;
+		return 0;
+	}
+
+	// The journal was not complete!! Execute now
+	return execute_journal();
+}
+
 // Freeing memory of inode_num to size new_size
 static int
 free_memory(uint32_t inode_num, uint32_t new_size)
@@ -1295,6 +1318,9 @@ grow_size(uint32_t inode_num, uint32_t new_size)
 static int
 change_size(ospfs_inode_t *oi, uint32_t inode_num, uint32_t new_size)
 {
+	// Check the journal
+	check_journal();
+
 	// Simple check to make sure we don't try to go over the file size limit
 	if(OSPFS_MAXFILESIZE < new_size)
 		return -ENOSPC;
@@ -1370,6 +1396,9 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 	ospfs_inode_t *oi = ospfs_inode(filp->f_dentry->d_inode->i_ino);
 	int retval = 0;
 	size_t amount = 0;
+
+	// Check the journal
+	check_journal();
 
 	// Make sure we don't read past the end of the file!
 	// Change 'count' so we never read past the end of the file.
@@ -1498,6 +1527,9 @@ ospfs_write(struct file *filp, const char __user *buffer, size_t count,
 	uint32_t blocknos[JOURNAL_MAX_BLOCKS];
 	int retval;
 	size_t amount;
+
+	// Check the journal
+	check_journal();
 
 	// Initialize variables
 	inode_num = filp->f_dentry->d_inode->i_ino;
@@ -1788,6 +1820,9 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 		 direntry_no, *journal_block;
 	ospfs_inode_t *f_inode, *dir_oi;
 	ospfs_direntry_t direntries[OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE];
+
+	// Check the journal
+	check_journal();
 	
 	dir_oi = ospfs_inode(dir->i_ino);
 	offset = 0;
@@ -1895,12 +1930,16 @@ ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidat
 	journal_header_t header;
 	ospfs_direntry_t *direntry_list;
 	ospfs_inode_t *inodes;
+	ospfs_inode_t *dir_oi;
 
 	// Local copy of direntry block
 	ospfs_direntry_t direntries[OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE];
 
+	// Check the journal
+	check_journal();
+
 	// Get the directory data
-	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
+	dir_oi = ospfs_inode(dir->i_ino);
 
 	// Initialize header
 	memset(&header, 0, sizeof(journal_header_t));
