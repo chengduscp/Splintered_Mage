@@ -994,6 +994,29 @@ change_size_to_journal(journal_header_t *header, resize_request *r)
 	return 0;
 }
 
+// Create direntry journal operation
+int
+create_to_journal(journal_header_t *header, ospfs_direntry_t *direntries)
+{
+	journal_header_t *journal_header;
+
+	// Write header to journal
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS),
+			header, (sizeof(journal_header_t)));
+	// Now journal has officially started
+
+	// Copy the directory data over
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb +
+		JOURNAL_DATA_BLOCKS_POS), direntries, OSPFS_BLKSIZE);
+
+	// Set the completed journal flag
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	journal_header->completed = 1;
+
+	return 0;
+}
+
 // Executes the journal based on whatever is in its header currently
 int
 execute_journal(void)
@@ -1096,10 +1119,12 @@ execute_journal(void)
 					JOURNAL_DATA_BLOCKS_POS + i), OSPFS_BLKSIZE);
 		}
 	}
-	else if(journal_header->execute_type == JOURNAL_HRDLNK) {
-
+	else if(journal_header->execute_type == JOURNAL_HRDLNK
+		|| journal_header->execute_type == JOURNAL_CREATE) {
+		// Copy over inode
 		*oi = journal_header->inode;
 
+		// Copy over the directory data block
 		memcpy(ospfs_block(journal_header->dir_data_blockno), 
 			ospfs_block(ospfs_super->os_firstjournalb + 
 				JOURNAL_DATA_BLOCKS_POS), OSPFS_BLKSIZE);
@@ -1865,19 +1890,34 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 static int
 ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidata *nd)
 {
-	int i;
-	ospfs_direntry_t *direntry;
-	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
-	ospfs_inode_t *inodes = ospfs_block(ospfs_super->os_firstinob);
+	int i, offset, error;
+	uint32_t direntry_block_pos, direntry_no, entry_ino;
+	journal_header_t header;
+	ospfs_direntry_t *direntry_list;
+	ospfs_inode_t *inodes;
 
-	uint32_t entry_ino = 0;
+	// Local copy of direntry block
+	ospfs_direntry_t direntries[OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE];
+
+	// Get the directory data
+	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
+
+	// Initialize header
+	memset(&header, 0, sizeof(journal_header_t));
+	header.execute_type = JOURNAL_CREATE;
 
 	// Check if we can add the new directory in the directory
-	direntry = create_blank_direntry(dir_oi, dir->i_ino);
-	if(IS_ERR(direntry)) {
-		return PTR_ERR(direntry);
-	}
+	direntry_block_pos = find_blank_direntry(dir_oi, &offset, dir->i_ino);
+	if(direntry_block_pos < 0)
+		return direntry_block_pos;
+	
+	// Get the data block number
+	header.dir_data_blockno = ospfs_inode_blockno(dir_oi, 
+		direntry_block_pos * OSPFS_BLKSIZE);
 
+	// The next free inode number
+	entry_ino = 0;
+	inodes = ospfs_block(ospfs_super->os_firstinob);
 	// Find an open inode
 	for(i = 0; i < ospfs_super->os_ninodes; i++) {
 		if(inodes[i].oi_nlink == 0) {
@@ -1888,21 +1928,42 @@ ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidat
 	if(i == ospfs_super->os_ninodes)
 		return -ENOSPC;
 
-	// Set the values of the inode
-	inodes[entry_ino].oi_nlink = 1;
-	inodes[entry_ino].oi_size = 0;
-	inodes[entry_ino].oi_ftype = OSPFS_FTYPE_REG;
-	inodes[entry_ino].oi_mode = mode;
+	// Set the value of the inode number
+	header.inode_num = entry_ino;
 
-	// Set up dentry
-	direntry->od_ino = entry_ino;
+	// Set the values of the inode
+	header.inode.oi_nlink = 1;
+	header.inode.oi_size = 0;
+	header.inode.oi_ftype = OSPFS_FTYPE_REG;
+	header.inode.oi_mode = mode;
+
+
+	// Create Local Copy of Block with the Blank Direntry that was found 
+	// earlier
+	direntry_list = ospfs_inode_data(dir_oi, 
+						direntry_block_pos * OSPFS_BLKSIZE);
+	direntry_no = 0;
+	while(direntry_no < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE) {
+		direntries[direntry_no] = direntry_list[direntry_no];
+		direntry_no++; 
+	}
+
+	// Change the local copy of the direntry
+	direntries[offset].od_ino = entry_ino;
 	// Create the name and null byte padding
 	for(i = 0; i < OSPFS_MAXNAMELEN + 1; i++) {
 		if(i < dentry->d_name.len)
-			direntry->od_name[i] = dentry->d_name.name[i];
+			direntries[offset].od_name[i] = dentry->d_name.name[i];
 		else
-			direntry->od_name[i] = '\0';
-	}	
+			direntries[offset].od_name[i] = '\0';
+	}
+
+	error = create_to_journal(&header, direntries);
+	if(error < 0)
+		return error;
+
+	execute_journal();
+
 
 	/* Execute this code after your function has successfully created the
 	   file.  Set entry_ino to the created file's inode number before
