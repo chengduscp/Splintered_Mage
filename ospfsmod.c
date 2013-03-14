@@ -218,7 +218,7 @@ ospfs_inode_blockno(ospfs_inode_t *oi, uint32_t offset)
 //	      offset -- byte offset into 'oi's data contents
 //   Returns: a pointer to the 'offset'th byte of 'oi's data contents
 //
-//	Be careful: the returned pointer is only valid within a single block.
+//	Be careful the returned pointer is only valid within a single block.
 //	This function is a simple combination of 'ospfs_inode_blockno'
 //	and 'ospfs_block'.
 
@@ -610,27 +610,6 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 //   bitvector_test() to do bit operations on the map.
 #define OSPFS_FIRST_VALID_BLOCK ospfs_super->os_firstdatab
 
-static uint32_t
-allocate_block(void)
-{
-	/* EXERCISE: Your code here */
-	uint32_t * bitvector = ospfs_block(2);
-	uint32_t blockno = OSPFS_FIRST_VALID_BLOCK;
-	while(blockno < ospfs_super->os_nblocks) {
-		if(bitvector_test(bitvector, blockno)) {
-			bitvector_clear(bitvector, blockno);
-			break;
-		}
-		blockno++;
-	}
-	if(ospfs_super->os_nblocks == blockno) {
-		return 0;
-	}
-	//eprintk("allocated %d\n", blockno);
-	return blockno;
-}
-
-
 // Find a free block NOT within range min to max
 static uint32_t
 find_free_block(uint32_t lower_bound, uint32_t upper_bound)
@@ -768,7 +747,6 @@ void print_super() {
 int
 init_resize_request(ospfs_inode_t *oi, resize_request *r)
 {
-	int i;
 	// Initialize file index
 	init_file_index(oi, &r->index);
 
@@ -1117,6 +1095,14 @@ execute_journal(void)
 				ospfs_block(ospfs_super->os_firstjournalb + 
 					JOURNAL_DATA_BLOCKS_POS + i), OSPFS_BLKSIZE);
 		}
+	}
+	else if(journal_header->execute_type == JOURNAL_HRDLNK) {
+
+		*oi = journal_header->inode;
+
+		memcpy(ospfs_block(journal_header->dir_data_blockno), 
+			ospfs_block(ospfs_super->os_firstjournalb + 
+				JOURNAL_DATA_BLOCKS_POS), OSPFS_BLKSIZE);
 	}
 
 	// Done our tasks, now empty the journal
@@ -1641,7 +1627,7 @@ find_direntry(ospfs_inode_t *dir_oi, const char *name, int namelen)
 // EXERCISE: Write this function.
 
 static ospfs_direntry_t *
-create_blank_direntry(ospfs_inode_t *dir_oi)
+create_blank_direntry(ospfs_inode_t *dir_oi, ino_t inode_num)
 {
 	// Outline:
 	// 1. Check the existing directory data for an empty entry.  Return one
@@ -1658,7 +1644,7 @@ create_blank_direntry(ospfs_inode_t *dir_oi)
 	for(blockno = 0; blockno < blocks_size; blockno++) {
 		direntry_list = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
 		
-		// Loop through all the entires, see if any have inode number 0
+		// Loop through all the entries, see if any have inode number 0
 		for(dirno = 0; dirno < direntries_per_block; dirno++) {
 			if(direntry_list[dirno].od_ino == 0) {
 				direntry = &direntry_list[dirno];
@@ -1672,7 +1658,8 @@ create_blank_direntry(ospfs_inode_t *dir_oi)
 	// See if we found any blank direntries
 	if(direntry == 0) {
 		// Check to see if we can add a new block to the directory
-		int error = 0;// = change_size(dir_oi, dir_oi->oi_size + OSPFS_BLKSIZE);
+		int error = 0;
+		change_size(dir_oi, inode_num ,dir_oi->oi_size + OSPFS_BLKSIZE);
 		if(error < 0)
 			ERR_PTR(-ENOSPC);
 
@@ -1690,6 +1677,49 @@ create_blank_direntry(ospfs_inode_t *dir_oi)
 
 	// In the clear, now return the new direntry
 	return direntry;
+}
+
+static int
+find_blank_direntry(ospfs_inode_t *dir_oi, uint32_t *offset) {
+	
+	int blockno, direntry_no;
+	ospfs_direntry_t *direntry_list = 0;
+	const uint32_t direntries_per_block = (OSPFS_BLKSIZE / OSPFS_DIRENTRY_SIZE);
+
+	// Go through the whole directory to see if there are any free blocks
+	uint32_t blocks_size = ospfs_size2nblocks(dir_oi->oi_size);
+	for(blockno = 0; blockno < blocks_size; blockno++) {
+		direntry_list = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
+		
+		// Loop through all the entries, see if any have inode number 0
+		for(direntry_no = 0; direntry_no < direntries_per_block; direntry_no++) {
+			if(direntry_list[direntry_no].od_ino == 0) {
+				*offset = direntry_no;
+				return blockno;
+			}
+		}
+	}
+/*
+		// Check to see if we can add a new block to the directory
+		int error = 0;
+		change_size(dir_oi, inode_num ,dir_oi->oi_size + OSPFS_BLKSIZE);
+		if(error < 0)
+			ERR_PTR(-ENOSPC);
+
+		// Clear the memory and set the direntry pointer to the first direntry
+		//  in the new block, found by the new dir_oi size
+		direntry_list =
+			ospfs_inode_data(
+				dir_oi,
+				(ospfs_size2nblocks(dir_oi->oi_size)) * OSPFS_BLKSIZE
+			);
+		memset(direntry_list, 0, OSPFS_BLKSIZE);
+
+		direntry = &direntry_list[0];
+	}
+	// In the clear, now return the new direntry
+	*/
+	return 0;
 }
 
 // ospfs_link(src_dentry, dir, dst_dentry
@@ -1724,9 +1754,18 @@ create_blank_direntry(ospfs_inode_t *dir_oi)
 static int
 ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dentry) {
 	/* EXERCISE: Your code here. */
-	ospfs_direntry_t *direntry;
-	ospfs_inode_t *link_inode;
-	ospfs_inode_t *dir_oi = ospfs_inode(dir->i_ino);
+	
+	journal_header_t link_header, *journal_header;
+	ospfs_direntry_t *direntry, *b_direntry, *direntry_list;
+	uint32_t journal_block_pos, offset, direntry_blockno,
+		 direntry_no, *journal_block;
+	ospfs_inode_t *f_inode, *link_inode, *dir_oi;
+	ospfs_direntry_t direntries[OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE];
+	
+	dir_oi = ospfs_inode(dir->i_ino);
+	offset = 0;
+
+	
 	if(src_dentry->d_inode->i_ino == 0) {
 		return -EIO;
 	}
@@ -1739,20 +1778,55 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 			dst_dentry->d_name.len)) {
 		return -EEXIST;
 	}
+	
+	
+	memset(&link_header, 0, sizeof(journal_header_t));
 
-	// Check if we can add the new directory in the directory
-	direntry = create_blank_direntry(dir_oi);
-	if(IS_ERR(direntry)) {
-		return PTR_ERR(direntry);
+	// Change Header Information
+	link_header.execute_type = JOURNAL_HRDLNK;
+	link_header.n_blocks_affected = 1;
+	
+	// Record the inode numbers into the journal
+	link_header.inode_num = src_dentry->d_inode->i_ino;
+
+	// Find inode pointer to be converted to actual inode and placed into the journal
+	f_inode = ospfs_inode(link_header.inode_num);
+
+	// Convert Inode Pointers found earlier and put into journal
+	link_header.inode = *f_inode;
+
+	// Finds the First Blank Direntry within the directory and records the actual block number into journal	
+	direntry_blockno = find_blank_direntry(dir_oi, &offset);
+	link_header.dir_data_blockno = ospfs_inode_blockno(dir_oi, direntry_blockno * OSPFS_BLKSIZE);
+
+	// Create Local Copy of Block with the Blank Direntry that was found earlier
+	direntry_list = ospfs_inode_data(dir_oi,direntry_blockno * OSPFS_BLKSIZE);
+	for( direntry_no = 0; direntry_no < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE; direntry_no++) {
+		 b_direntry = &direntry_list[direntry_no];
+		 direntries[direntry_no] = *b_direntry;
 	}
 
-	//dst_dentry->d_inode->i_ino = src_dentry->d_inode->i_ino;
-	direntry->od_ino = src_dentry->d_inode->i_ino;
-	// Create the name and null byte padding
+	// Change the Blank Direntry to What it should look like
+	direntry = &direntries[offset];
 	strncpy(direntry->od_name, dst_dentry->d_name.name, dst_dentry->d_name.len);
-
+	direntry->od_ino = link_header.inode_num;
 	link_inode = ospfs_inode(direntry->od_ino);
 	link_inode->oi_nlink++;
+
+	// Record direntry block into the journal's data block
+	journal_block_pos = ospfs_super->os_firstjournalb + JOURNAL_DATA_BLOCKS_POS;
+	journal_block = ospfs_block(journal_block_pos);
+	memcpy(journal_block, direntries, OSPFS_BLKSIZE);
+	
+	// Copy Header Information into Journal Header
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS), &link_header, sizeof(journal_header_t));
+
+	// Update Journal Header Completion Flag
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	journal_header->completed = 1;
+	
+	execute_journal();
 
 	return 0;
 }
@@ -1797,7 +1871,7 @@ ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidat
 	uint32_t entry_ino = 0;
 
 	// Check if we can add the new directory in the directory
-	direntry = create_blank_direntry(dir_oi);
+	direntry = create_blank_direntry(dir_oi, dir->i_ino);
 	if(IS_ERR(direntry)) {
 		return PTR_ERR(direntry);
 	}
@@ -1889,7 +1963,7 @@ ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 	}
 
 	// Get a new direntry
-	direntry = create_blank_direntry(dir_oi);
+	direntry = create_blank_direntry(dir_oi, dir->i_ino);
 	if(IS_ERR(direntry))
 		return PTR_ERR(direntry);
 

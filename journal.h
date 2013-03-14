@@ -76,6 +76,9 @@ typedef struct journal_header_struct {
 
 	// For block freeing and adding
 	uint32_t file_resize_type;
+
+	// Directory entry data block number
+	uint32_t dir_data_blockno;
 } journal_header_t;
 
 // Useful struct (going to change)
