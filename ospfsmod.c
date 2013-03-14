@@ -727,7 +727,7 @@ init_file_index(ospfs_inode_t *oi, file_index_t *idx)
 }
 
 // For debugging, print block
-void print_super() {
+void print_super(void) {
 	eprintk("Sizes:\n");
 	eprintk("Super nblocks: %d\n", ospfs_super->os_nblocks);
 	eprintk("Super ninodes: %d\n", ospfs_super->os_ninodes);
@@ -1658,8 +1658,7 @@ create_blank_direntry(ospfs_inode_t *dir_oi, ino_t inode_num)
 	// See if we found any blank direntries
 	if(direntry == 0) {
 		// Check to see if we can add a new block to the directory
-		int error = 0;
-		change_size(dir_oi, inode_num ,dir_oi->oi_size + OSPFS_BLKSIZE);
+		int error = change_size(dir_oi, inode_num ,dir_oi->oi_size + OSPFS_BLKSIZE);
 		if(error < 0)
 			ERR_PTR(-ENOSPC);
 
@@ -1680,14 +1679,16 @@ create_blank_direntry(ospfs_inode_t *dir_oi, ino_t inode_num)
 }
 
 static int
-find_blank_direntry(ospfs_inode_t *dir_oi, uint32_t *offset) {
+find_blank_direntry(ospfs_inode_t *dir_oi, uint32_t *offset, ino_t inode_num) {
 	
-	int blockno, direntry_no;
+	int blockno, direntry_no, blank_found;
 	ospfs_direntry_t *direntry_list = 0;
 	const uint32_t direntries_per_block = (OSPFS_BLKSIZE / OSPFS_DIRENTRY_SIZE);
+	uint32_t blocks_size;
+	blank_found = 0;
 
 	// Go through the whole directory to see if there are any free blocks
-	uint32_t blocks_size = ospfs_size2nblocks(dir_oi->oi_size);
+	blocks_size = ospfs_size2nblocks(dir_oi->oi_size);
 	for(blockno = 0; blockno < blocks_size; blockno++) {
 		direntry_list = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
 		
@@ -1695,16 +1696,17 @@ find_blank_direntry(ospfs_inode_t *dir_oi, uint32_t *offset) {
 		for(direntry_no = 0; direntry_no < direntries_per_block; direntry_no++) {
 			if(direntry_list[direntry_no].od_ino == 0) {
 				*offset = direntry_no;
+				blank_found = 1;
 				return blockno;
 			}
 		}
 	}
-/*
+
+	if(blank_found == 0) {
 		// Check to see if we can add a new block to the directory
-		int error = 0;
-		change_size(dir_oi, inode_num ,dir_oi->oi_size + OSPFS_BLKSIZE);
+		int error = change_size(dir_oi, inode_num ,dir_oi->oi_size + OSPFS_BLKSIZE);
 		if(error < 0)
-			ERR_PTR(-ENOSPC);
+			return -ENOSPC;
 
 		// Clear the memory and set the direntry pointer to the first direntry
 		//  in the new block, found by the new dir_oi size
@@ -1715,11 +1717,11 @@ find_blank_direntry(ospfs_inode_t *dir_oi, uint32_t *offset) {
 			);
 		memset(direntry_list, 0, OSPFS_BLKSIZE);
 
-		direntry = &direntry_list[0];
+		blockno = ospfs_size2nblocks(dir_oi->oi_size) - 1;
+		*offset = 0;
 	}
 	// In the clear, now return the new direntry
-	*/
-	return 0;
+	return blockno;
 }
 
 // ospfs_link(src_dentry, dir, dst_dentry
@@ -1759,7 +1761,7 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 	ospfs_direntry_t *direntry, *b_direntry, *direntry_list;
 	uint32_t journal_block_pos, offset, direntry_blockno,
 		 direntry_no, *journal_block;
-	ospfs_inode_t *f_inode, *link_inode, *dir_oi;
+	ospfs_inode_t *f_inode, *dir_oi;
 	ospfs_direntry_t direntries[OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE];
 	
 	dir_oi = ospfs_inode(dir->i_ino);
@@ -1796,7 +1798,7 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 	link_header.inode = *f_inode;
 
 	// Finds the First Blank Direntry within the directory and records the actual block number into journal	
-	direntry_blockno = find_blank_direntry(dir_oi, &offset);
+	direntry_blockno = find_blank_direntry(dir_oi, &offset, dir->i_ino);
 	link_header.dir_data_blockno = ospfs_inode_blockno(dir_oi, direntry_blockno * OSPFS_BLKSIZE);
 
 	// Create Local Copy of Block with the Blank Direntry that was found earlier
@@ -1810,8 +1812,8 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 	direntry = &direntries[offset];
 	strncpy(direntry->od_name, dst_dentry->d_name.name, dst_dentry->d_name.len);
 	direntry->od_ino = link_header.inode_num;
-	link_inode = ospfs_inode(direntry->od_ino);
-	link_inode->oi_nlink++;
+	link_header.inode.oi_nlink++;
+	//link_inode->oi_nlink++;
 
 	// Record direntry block into the journal's data block
 	journal_block_pos = ospfs_super->os_firstjournalb + JOURNAL_DATA_BLOCKS_POS;
