@@ -31,10 +31,13 @@ int diskfd;
 uint32_t nblocks;
 uint32_t ninodes;
 uint32_t nbitblock;
+
+// JOURNAL INFORMATION
 // Number of blocks we will allocate for the journal
 uint32_t njournalblock;
 uint32_t nextb;
 uint32_t nextinode;
+
 int verbose = 0;
 int link_contents = 0;
 
@@ -314,7 +317,10 @@ opendisk(const char *name)
 		putblk(b);
 	}
 
-	// Adding the journal before the inodes
+	/******************************************************************
+	 * JOURNAL BLOCKS
+	 */
+	// Adding the journal after the inodes
 	njournalblock = JOURNAL_HEADER_SIZE + JOURNAL_BLOCKNO_LIST_SIZE +
 						JOURNAL_INDIR_BLOCKS + JOURNAL_MAX_BLOCKS;
 

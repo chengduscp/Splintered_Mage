@@ -330,7 +330,6 @@ ospfs_get_sb(struct file_system_type *fs_type, int flags, const char *dev_name, 
 
 // ospfs_delete_dentry
 //	Another bookkeeping function.
-
 static int
 ospfs_delete_dentry(struct dentry *dentry)
 {
@@ -357,7 +356,8 @@ ospfs_delete_dentry(struct dentry *dentry)
 //   Effect: Looks up the entry named 'dentry'.  If found, attaches the
 //	     entry's 'struct inode' to the 'dentry'.  If not found, returns
 //	     a "negative dentry", which has no inode attachment.
-
+//
+// This operation does not require the journal, since it reads only
 static struct dentry *
 ospfs_dir_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *ignore)
 {
@@ -431,8 +431,7 @@ ospfs_dir_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *ign
 //   Returns: 1 at end of directory, 0 if filldir returns < 0 before the end
 //     of the directory, and -(error number) on error.
 //
-//   EXERCISE: Finish implementing this function.
-
+// This operation does not require the journal, since it reads only
 static int
 ospfs_dir_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
@@ -464,8 +463,7 @@ ospfs_dir_readdir(struct file *filp, void *dirent, filldir_t filldir)
 
 		/* If at the end of the directory, set 'r' to 1 and exit
 		 * the loop.  For now we do this all the time.
-		 *
-		 * EXERCISE: Your code here */
+		 */
 		// Check if we have reached the end of the file
 		if(dir_oi->oi_size < (f_pos - 2)*sizeof(ospfs_direntry_t)) {
 			r = 1;
@@ -492,7 +490,6 @@ ospfs_dir_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		 * advance to the next directory entry.
 		 */
 
-		/* EXERCISE: Your code here */
 		od = ospfs_inode_data(dir_oi, (f_pos - 2)*sizeof(ospfs_direntry_t));
 		if(od->od_ino == 0) {
 			f_pos++;
@@ -534,28 +531,18 @@ ospfs_dir_readdir(struct file *filp, void *dirent, filldir_t filldir)
 /*****************************************************************************
  * FREE-BLOCK BITMAP OPERATIONS
  *
- * EXERCISE: Implement these functions.
  */
 
-// allocate_block()
-//	Use this function to allocate a block.
-//
-//   Inputs:  none
-//   Returns: block number of the allocated block,
-//	      or 0 if the disk is full
-//
-//   This function searches the free-block bitmap, which starts at Block 2, for
-//   a free block, allocates it (by marking it non-free), and returns the block
-//   number to the caller.  The block itself is not touched.
-//
-//   Note:  A value of 0 for a bit indicates the corresponding block is
-//      allocated; a value of 1 indicates the corresponding block is free.
-//
-//   You can use the functions bitvector_set(), bitvector_clear(), and
-//   bitvector_test() to do bit operations on the map.
-#define OSPFS_FIRST_VALID_BLOCK ospfs_super->os_firstdatab
 
-// Find a free block NOT within range min to max
+// allocate_blockno(lower_bound, upper_bound)
+//	Use this function to find a free block to allocate.
+//
+//   Inputs:  blockno -- the block number to be allocated
+//   Returns: none
+//
+//   This function finds a free block NOT within range lower_bound to upper_bound.
+//   This allows us to find multiple free blocks in the bitmap without actually
+//   having to change the bitmap
 static uint32_t
 find_free_block(uint32_t lower_bound, uint32_t upper_bound)
 {
@@ -577,6 +564,15 @@ find_free_block(uint32_t lower_bound, uint32_t upper_bound)
 	return 0;
 }
 
+// allocate_blockno(blockno)
+// Use this to allocate a block on the bitmap
+//
+// Inputs:  blockno -- the block number to be allocated
+// Returns: none
+//
+// Use this function to allocate a block.
+// This function gets and allocates block number blockno on the actual
+// bitmap block. It should only be used in journal
 int
 allocate_blockno(uint32_t blockno)
 {
@@ -589,24 +585,21 @@ allocate_blockno(uint32_t blockno)
 	return 0;
 }
 
-
 // free_block(blockno)
-//	Use this function to free an allocated block.
+// Use this function to free an allocated block on the bitmap.
 //
-//   Inputs:  blockno -- the block number to be freed
-//   Returns: none
+// Inputs:  blockno -- the block number to be freed
+// Returns: none
 //
-//   This function should mark the named block as free in the free-block
-//   bitmap.  (You might want to program defensively and make sure the block
-//   number isn't obviously bogus: the boot sector, superblock, free-block
-//   bitmap, and inode blocks must never be freed.  But this is not required.)
-
+// This function should mark the named block as free in the free-block
+// bitmap. It does nothing if the block is outside the valid range of
+// acceptable data blocks.
 static void
 free_block(uint32_t blockno)
 {
-	/* EXERCISE: Your code here */
 	uint32_t * bitvector = ospfs_block(2);
-	if(ospfs_super->os_nblocks < blockno || blockno < OSPFS_FIRST_VALID_BLOCK) { // Check for validity
+	// Check for validity
+	if(ospfs_super->os_nblocks < blockno || blockno < ospfs_super->os_firstdatab) {
 		return;
 	}
 
@@ -616,22 +609,38 @@ free_block(uint32_t blockno)
 
 /*****************************************************************************
  * FILE OPERATIONS
- *
- * EXERCISE: Finish off change_size, read, and write.
- *
- * The find_*, add_block, and remove_block functions are only there to support
- * the change_size function.  If you prefer to code change_size a different
- * way, then you may not need these functions.
- *
  */
 
+
+ /* Helper functions
+ * The block_*_index, add_block_file, and remove_block_file functions are
+ * there to support the change_size function. 
+ */
+
+// block_indirect2_index(blockno)
+// Use this function to find if blockno is in the doubly indirect block
+//
+// Inputs:  blockno -- the size in blocks of the file
 // Returns -1 if not in indirect2 block range, 0 if it is
+//
+// This function determines if blockno is in the doubly indirect range or
+// not. Used in change_size related functions
 int block_indirect2_index(uint32_t blockno)
 {
 	return ((blockno < OSPFS_NDIRECT + OSPFS_NINDIRECT) ? -1 : 0);
 }
-// Returns -1 if not in indirect or direct block range, or the index >= 0 of
-// blockno if it is
+
+// block_indirect_index(blockno)
+// Use this function to find if blockno is in the (doubly) indirect range
+//
+// Inputs:  blockno -- the size in blocks of the file
+// Returns -1 if not in doubly indirect or indirect block range, or the
+// index >= 0 of blockno if it is
+//
+// This function determines if blockno is in the indirect range and if it
+// is, which block number in the doubly indirect number it is at. If it is
+// only in the indirect block range, it return 0. Otherwise it returns -1.
+// Used in change_size related functions.
 int block_indirect_index(uint32_t blockno)
 {
 	// Check if in direct block range
@@ -647,7 +656,17 @@ int block_indirect_index(uint32_t blockno)
 	// Now in the indirect2 block range
 	return blockno / OSPFS_NINDIRECT;
 }
+
+// block_direct_index(blockno)
+// Use this to find the direct block index of blockno
+//
+// Inputs:  blockno -- the size in blocks of the file
 // Returns the direct block index of blockno
+//
+// This function determines the direct index in the direct blocks, indirect
+// block, or doubly indirect block blockno is in. Used in conjuction with
+// the previous two functions, it can find exactly where you need to add a
+// block
 int block_direct_index(uint32_t blockno)
 {
 	if(blockno < OSPFS_NDIRECT)
@@ -656,7 +675,16 @@ int block_direct_index(uint32_t blockno)
 	return blockno % OSPFS_NINDIRECT;
 }
 
+// init_file_index(oi, idx)
 // Initializes a file_index_t based on a given inode
+//
+// Inputs:  oi -- the inode copy to be checked
+//          idx -- the file index struct to store the index information (out)
+// Returns the direct block index of blockno
+//
+// This initializes the file index struct using the above three functions.
+// It also gets pointers to the doubly indirect and indirect blocks, if
+// appropriate
 int
 init_file_index(ospfs_inode_t *oi, file_index_t *idx)
 {
@@ -671,24 +699,18 @@ init_file_index(ospfs_inode_t *oi, file_index_t *idx)
 	return 0;
 }
 
-// For debugging, print block
-void print_super(void) {
-	eprintk("Sizes:\n");
-	eprintk("Super nblocks: %d\n", ospfs_super->os_nblocks);
-	eprintk("Super ninodes: %d\n", ospfs_super->os_ninodes);
-	eprintk("Super firstinob: %d\n", ospfs_super->os_firstinob);
-	eprintk("Super firstjournalb: %d\n", ospfs_super->os_firstjournalb);
-	eprintk("Super njournalb: %d\n", ospfs_super->os_njournalb);
-	eprintk("Super firstdatab: %d\n", ospfs_super->os_firstdatab);
-}
-
-// Prepares a resize_request for a file resize. Works regardless of increasing 
-// or decreasing file size. Initializes the resize_request based on the 
+// init_resize_request(oi, r)
+// Initialized the resize request to pass to change_size
+//
 // current size of the request
-// Inputs: oi - copy of the inode we will change (represents what the inode 
-//              will be)
-//         r - request_struct to contain relevant information for the resize
+// Inputs:  oi -- copy of the inode we will change (represents what the inode
+//                will be)
+//          r -- request_struct to contain relevant information for the resize
 // Returns: 0 on success, error code on failure
+// 
+// Prepares a resize_request for a file resize. Works regardless of increasing 
+// or decreasing file size. Initializes the resize_request based on the current
+// size of the file
 int
 init_resize_request(ospfs_inode_t *oi, resize_request *r)
 {
@@ -738,8 +760,16 @@ init_resize_request(ospfs_inode_t *oi, resize_request *r)
 	return 0;
 }
 
+// update_bounds(r, new_num)
+// Get new bounds of blocks allocated for r using new_num
+//
+// current size of the request
+// Inputs:  r -- request_struct to redo bounds
+//          new_num -- new number to change the bounds by
+// Returns: 0 on success, error code on failure
+// 
 // Book-keeping funciton for updating the bounds for block checking for
-//  allocating blocks
+// allocating blocks
 void
 update_bounds(resize_request *r, uint32_t new_num)
 {
@@ -752,13 +782,17 @@ update_bounds(resize_request *r, uint32_t new_num)
 	}
 }
 
-// Free one memory block in oi
+// free_block_file(oi, r)
+// Free one more block from file oi
+//
 // Inputs: oi - copy of the inode we will change (represents what the inode 
 //              will be)
 //         r - request_struct containing relevant information for the resize
-// Preconditions: Assumes we are not going make r free more than 
-//                JOURNAL_MAX_BLOCKS
 // Returns: 0 on success, error code on failure
+//
+// Free one memory block in inode oi. Assumes we are not going make r free
+// more than JOURNAL_MAX_BLOCKS and that oi is a COPY of the inode, not the
+// acutal inode data
 int
 free_block_file(ospfs_inode_t *oi, resize_request *r)
 {
@@ -800,12 +834,23 @@ free_block_file(ospfs_inode_t *oi, resize_request *r)
 			}
 		}
 	}
-	/* EXERCISE: Your code here */
+
+	// Decrease the size
 	oi->oi_size = (idx->blk_size - 1)*OSPFS_BLKSIZE;
 	return 0; // Replace this line
 }
 
-// Add one memory block to file
+// free_block_file(oi, r)
+// Add one memory block to file oi
+//
+// Inputs: oi - copy of the inode we will change (represents what the inode 
+//              will be)
+//         r - request_struct containing relevant information for the resize
+// Returns: 0 on success, error code on failure
+//
+// Allocates one memory block in inode oi. Assumes we are not going make r
+// allocate more than JOURNAL_MAX_BLOCKS and that oi is a COPY of the
+// inode, not the acutal inode data
 int
 add_block_file(ospfs_inode_t *oi, resize_request *r)
 {
@@ -897,8 +942,20 @@ add_block_file(ospfs_inode_t *oi, resize_request *r)
 	return 0; // Replace this line
 }
 
+/***********************************************
+ * Journal change functions
+ */
 
-// Change size journal operations
+// change_size_to_journal(header, r)
+// Sends changing file size information to the journal
+//
+// Inputs:  header -- the journal header struct with the appropriate information
+//          r -- resize request information with appropriate information
+//
+// Returns: 0 if success and error code on failure.
+// 
+// This writes the information to change the size of a file into the actual
+// journal blocks, ready to be executed
 int
 change_size_to_journal(journal_header_t *header, resize_request *r)
 {
@@ -939,7 +996,83 @@ change_size_to_journal(journal_header_t *header, resize_request *r)
 	return 0;
 }
 
-// Create direntry journal operation
+// write_to_journal(header, blocknos, blocks_stored)
+// Sends writing to a file information to the journal
+//
+// Inputs:  header -- the journal header struct with the appropriate information
+//          blocknos -- the list of blocknos written to (max size JOURNAL_MAX_SIZE)
+//          blocks_stored -- the size of blocknos
+//
+// Returns: 0 if success and error code on failure.
+// 
+// This writes the information to write to a file into the actual
+// journal blocks, ready to be executed
+int
+write_to_journal(journal_header_t *header, uint32_t *blocknos,
+	uint32_t *blocks_stored)
+{
+	journal_header_t *journal_header;
+
+	// Write out header (simple for write)
+	header->n_blocks_affected = *blocks_stored;
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS),
+			header, (sizeof(journal_header_t)));
+
+	// Write out blocknos
+	memcpy(ospfs_block(ospfs_super->os_firstjournalb +
+		JOURNAL_BLOCKNO_LIST_POS), blocknos,
+		JOURNAL_MAX_BLOCKS * (sizeof(uint32_t)));	
+
+	// Set the completed journal flag
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	journal_header->completed = 1;
+
+	return 0;
+}
+
+// write_to_journal(header, blocknos, blocks_stored)
+// Restart the write journal header
+//
+// Inputs:  header -- the journal header struct with the appropriate information
+//          blocknos -- the list of blocknos written to (max size JOURNAL_MAX_SIZE)
+//          blocks_stored -- the size of blocknos
+//
+// Returns: 0 if success and error code on failure.
+// 
+// This function basically restarts blocknos and blocks_stored, ready for the next
+// round of writes. This function exists because we limit how many data blocks we
+// can write at once
+int
+restart_write_journal(journal_header_t *header, uint32_t *blocknos,
+	uint32_t *blocks_stored)
+{
+	journal_header_t *journal_header;
+
+	// Restart block count
+	*blocks_stored = 0;
+
+	// Clear the blocknos
+	memset(blocknos, 0, OSPFS_BLKSIZE);
+
+	// Set the started flag of the journal
+	journal_header = (journal_header_t*)
+			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
+	journal_header->execute_type = JOURNAL_WRITE;
+
+	return 0;
+}
+
+// create_to_journal(header, direntries)
+// Sends creating a file information to the journal
+//
+// Inputs:  header -- the journal header struct with the appropriate information
+//          direntires -- the list of direntries to be changed (appropriate block)
+//
+// Returns: 0 if success and error code on failure.
+// 
+// This writes the information to create a file into the actual
+// journal blocks, ready to be executed
 int
 create_to_journal(journal_header_t *header, ospfs_direntry_t *direntries)
 {
@@ -962,7 +1095,14 @@ create_to_journal(journal_header_t *header, ospfs_direntry_t *direntries)
 	return 0;
 }
 
+// execute_journal()
 // Executes the journal based on whatever is in its header currently
+//
+// Returns: 0 if success and error code on failure.
+// 
+// This is the primary method of Journaling. It takes whatever is in the
+// journal currently and executes it based of that information. This is
+// The only function which actually writes to the file system.
 int
 execute_journal(void)
 {
@@ -1092,7 +1232,13 @@ execute_journal(void)
 	return 0;
 }
 
+// check_journal()
 // Check if the journal is empty
+//
+// Returns: 0 if success and error code on failure.
+// 
+// This is called at the start of every atomic function and makes sure
+// the journal is empty, and executes it if it is not
 int
 check_journal(void)
 {
@@ -1115,44 +1261,41 @@ check_journal(void)
 	return execute_journal();
 }
 
-// ospfs_unlink(dirino, dentry)
-//   This function is called to remove a file.
-//
-//   Inputs: dirino  -- You may ignore this.
-//           dentry  -- The 'struct dentry' structure, which contains the inode
-//                      the directory entry points to and the directory entry's
-//                      directory.
-//
-//   Returns: 0 if success and -ENOENT on entry not found.
-//
-//   EXERCISE: Make sure that deleting symbolic links works correctly.
-/*
-	blocks_size = ospfs_size2nblocks(dir_oi->oi_size);
-	for(blockno = 0; blockno < blocks_size; blockno++) {
-		direntry_list = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
-		
-		// Loop through all the entries, see if any have inode number 0
-		for(direntry_no = 0; direntry_no < direntries_per_block; direntry_no++) {
-			if(direntry_list[direntry_no].od_ino == 0) {
-				*offset = direntry_no;
-				blank_found = 1;
-				return blockno;
-			}
-		}
-	}
 
-*/
+
+/*********************************************************************************
+ * File System Operations (implemented with journal)
+ */
+
+
+// ospfs_unlink(dirino, dentry)
+// This function is called to remove or unlink the hardlink of a file.
+//
+// Inputs: dirino  -- You may ignore this.
+//         dentry  -- The 'struct dentry' structure, which contains the inode
+//                    the directory entry points to and the directory entry's
+//                    directory.
+//
+// Returns: 0 if success and -ENOENT on entry not found.
+// 
+// This unlinks an inode based of a dir_entry. This operation is atomic,
+// so there if it fails, or gets interupted, it will not affect the
+// actual file system. However, if the number of links is zero, it changes
+// the size of the inode to zero, another atomic operation.
 static int
 ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 {
 	journal_header_t unlink_header, *journal_header;
-	ospfs_direntry_t direntries[(OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE)];
 	uint32_t blocksize, journal_block_pos, *journal_block;
+	ospfs_direntry_t direntries[(OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE)];
+
 	ospfs_direntry_t *direntries_in_block, *direntry;
-	ospfs_inode_t *oi = ospfs_inode(dentry->d_inode->i_ino);
-	ospfs_inode_t *dir_oi = ospfs_inode(dentry->d_parent->d_inode->i_ino);
 	int blockno, dirno, found;
 	ospfs_direntry_t *od;
+
+	ospfs_inode_t *oi = ospfs_inode(dentry->d_inode->i_ino);
+	ospfs_inode_t *dir_oi = ospfs_inode(dentry->d_parent->d_inode->i_ino);
+
 	uint32_t direntry_index = 0;
 	uint32_t direntries_per_block = OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE;
 	blocksize = dir_oi->oi_size;
@@ -1170,7 +1313,6 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 		    	&& memcmp(od[dirno].od_name, dentry->d_name.name, dentry->d_name.len) == 0) {
 		    	direntry_index = dirno;
 		    	found = 1;
-		    	//eprintk("Found! \n");
 				break;
 			}
 		}
@@ -1191,40 +1333,12 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 
 	// Locate which block the direntry that is being unlinked is and record in journal
 	unlink_header.dir_data_blockno = ospfs_inode_blockno(dir_oi, blockno * OSPFS_BLKSIZE);
-
-	eprintk("Targeted File: %s \n", dentry->d_name.name);
-	//eprintk("Entry Off: %d \n", entry_off);
 	
 	// Copy All Directory Entries in the block that has the
 	// target Directory Entry and copy it to the local buffer
 	direntries_in_block = ospfs_inode_data(dir_oi, blockno * OSPFS_BLKSIZE);
-
-	//DEBUGGING
-	int b; 
-	ospfs_direntry_t *debuggingdirentries;
-	debuggingdirentries = direntries_in_block;
-	eprintk("This is the 1st Loop checking direntries in block!\n");
-	for(b = 0; b < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE; b++)
-	{
-		eprintk("%d %s, ", debuggingdirentries[b].od_ino, debuggingdirentries[b].od_name);
-	}
-	eprintk("\n");
-
 	memcpy(direntries, direntries_in_block, OSPFS_BLKSIZE);
-	eprintk("Direntry_index: %d \n", direntry_index);
 	direntry = &direntries[direntry_index];
-
-		// DEBUGGING
-	debuggingdirentries = direntries;
-	eprintk("This is the 2nd Loop checking direntries (before memcpy)! \n");
-	for(b = 0; b < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE; b++)
-	{
-		eprintk("%d %d %s, ", b, debuggingdirentries[b].od_ino, debuggingdirentries[b].od_name);
-	}
-	eprintk("\n");
-
-	eprintk("This is the Direntry pointed at by direntry: %d %s \n", direntry->od_ino, direntry->od_name);
-
 
 	//memset(direntry, 0, sizeof(ospfs_direntry_t));
 	direntry->od_ino = 0;
@@ -1234,15 +1348,6 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 	if(unlink_header.inode.oi_ftype == OSPFS_FTYPE_SYMLINK) {
 		memset(&unlink_header.inode, 0, sizeof(ospfs_symlink_inode_t));
 	}
-	
-	// DEBUGGING
-	debuggingdirentries = direntries;
-	eprintk("This is the 3nd Loop checking direntries again (after inode change)! \n");
-	for(b = 0; b < OSPFS_BLKSIZE/OSPFS_DIRENTRY_SIZE; b++)
-	{
-		eprintk("%d %d %s, ", b, debuggingdirentries[b].od_ino, debuggingdirentries[b].od_name);
-	}
-	eprintk("\n");
 
 	// Copy direntry buffer into journal data block
 	journal_block_pos = ospfs_super->os_firstjournalb + JOURNAL_DATA_BLOCKS_POS;
@@ -1264,20 +1369,24 @@ ospfs_unlink(struct inode *dirino, struct dentry *dentry)
 	if(unlink_header.inode.oi_nlink == 0) {
 		change_size(&unlink_header.inode, unlink_header.inode_num, 0);
 	}
-	/*
-	*/
-
-
-/*	// Check if we can free the blocks
-	if(oi->oi_nlink == 0) {
-
-		change_size(oi, dentry->d_inode->i_ino, 0);
-	}*/
 
 	return 0;
 }
 
-// Freeing memory of inode_num to size new_size
+// grow_size(inode_num, new_size)
+// Free the memory of inode_num to size new_size
+//
+// Inputs: inode_num  -- the inode to change the size of
+//         new_size -- the new smaller size
+//
+// Returns: 0 on success, < 0 on error.  In particular:
+//    -ENOSPC: if there are no free blocks available
+//    -EIO:    an I/O error -- for example an indirect block should
+//             exist, but doesn't
+//
+// This shrinks the file size appropriately using the journal. This 
+// operation is atomic, so there if it fails, or gets interupted, it will
+// not affect the actual file system
 static int
 free_memory(uint32_t inode_num, uint32_t new_size)
 {
@@ -1340,6 +1449,20 @@ free_memory(uint32_t inode_num, uint32_t new_size)
 	return 0;
 }
 
+// grow_size(inode_num, new_size)
+// Grow the memory of inode_num to size new_size
+//
+// Inputs: inode_num  -- the inode to change the size of
+//         new_size -- the new larger size
+//
+//   Returns: 0 on success, < 0 on error.  In particular:
+//      -ENOSPC: if there are no free blocks available
+//      -EIO:    an I/O error -- for example an indirect block should
+//               exist, but doesn't
+//
+// This grows the file size appropriately using the journal. This 
+// operation is atomic, so there if it fails, or gets interupted, it will
+// not affect the actual file system
 static int
 grow_size(uint32_t inode_num, uint32_t new_size)
 {
@@ -1396,43 +1519,21 @@ grow_size(uint32_t inode_num, uint32_t new_size)
 	return 0;
 }
 
-
-// change_size(oi, want_size)
-//	Use this function to change a file's size, allocating and freeing
-//	blocks as necessary.
+// change_size(oi, inode_num, new_size)
+// Change the inode in the header based on the resize request
 //
-//   Inputs:  oi	-- pointer to the file whose size we're changing
-//	      want_size -- the requested size in bytes
+// Inputs: oi - copy of the inode we will change (represents what the inode 
+//              will be)
+//         r - request_struct containing relevant information for the resize
+//
 //   Returns: 0 on success, < 0 on error.  In particular:
-//		-ENOSPC: if there are no free blocks available
-//		-EIO:    an I/O error -- for example an indirect block should
-//			 exist, but doesn't
-//	      If the function succeeds, the file's oi_size member should be
-//	      changed to want_size, with blocks allocated as appropriate.
-//	      Any newly-allocated blocks should be erased (set to 0).
-//	      If there is an -ENOSPC error when growing a file,
-//	      the file size and allocated blocks should not change from their
-//	      original values!!!
-//            (However, if there is an -EIO error, do not worry too much about
-//	      restoring the file.)
+//      -ENOSPC: if there are no free blocks available
+//      -EIO:    an I/O error -- for example an indirect block should
+//               exist, but doesn't
 //
-//   If want_size has the same number of blocks as the current file, life
-//   is good -- the function is pretty easy.  But the function might have
-//   to add or remove blocks.
-//
-//   If you need to grow the file, then do so by adding one block at a time
-//   using the add_block function you coded above. If one of these additions
-//   fails with -ENOSPC, you must shrink the file back to its original size!
-//
-//   If you need to shrink the file, remove blocks from the end of
-//   the file one at a time using the remove_block function you coded above.
-//
-//   Also: Don't forget to change the size field in the metadata of the file.
-//         (The value that the final add_block or remove_block set it to
-//          is probably not correct).
-//
-//   EXERCISE: Finish off this function.
-
+// This is a wrapper for free_memory and grow_size. It changes the size
+// of a file to request using the journal. This means that if the request
+// fails nothing happens to the acutal file system.
 static int
 change_size(ospfs_inode_t *oi, uint32_t inode_num, uint32_t new_size)
 {
@@ -1460,7 +1561,8 @@ change_size(ospfs_inode_t *oi, uint32_t inode_num, uint32_t new_size)
 //	owner, or permissions, among other things.
 //	OSPFS only pays attention to file size changes (see change_size above).
 //	We have written this function for you -- except for file quotas.
-
+//
+// This function calls the change_size function, so it may write to the journal
 static int
 ospfs_notify_change(struct dentry *dentry, struct iattr *attr)
 {
@@ -1505,9 +1607,8 @@ ospfs_notify_change(struct dentry *dentry, struct iattr *attr)
 //   as 'f_pos'; read data starting at that position, and update the position
 //   when you're done.
 //
-//   EXERCISE: Complete this function.
-
-
+// This function does not require the journal, since it does not change the
+// file system.
 static ssize_t
 ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 {
@@ -1571,52 +1672,6 @@ ospfs_read(struct file *filp, char __user *buffer, size_t count, loff_t *f_pos)
 	return (retval >= 0 ? amount : retval);
 }
 
-// Journal write functions
-int
-write_to_journal(journal_header_t *header, uint32_t *blocknos,
-	uint32_t *blocks_stored)
-{
-	journal_header_t *journal_header;
-
-	// Write out header (simple for write)
-	header->n_blocks_affected = *blocks_stored;
-	memcpy(ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS),
-			header, (sizeof(journal_header_t)));
-
-	// Write out blocknos
-	memcpy(ospfs_block(ospfs_super->os_firstjournalb +
-		JOURNAL_BLOCKNO_LIST_POS), blocknos,
-		JOURNAL_MAX_BLOCKS * (sizeof(uint32_t)));	
-
-	// Set the completed journal flag
-	journal_header = (journal_header_t*)
-			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
-	journal_header->completed = 1;
-
-	return 0;
-}
-
-// Restart the write journal header
-int
-restart_write_journal(journal_header_t *header, uint32_t *blocknos,
-	uint32_t *blocks_stored)
-{
-	journal_header_t *journal_header;
-
-	// Restart block count
-	*blocks_stored = 0;
-
-	// Clear the blocknos
-	memset(blocknos, 0, OSPFS_BLKSIZE);
-
-	// Set the started flag of the journal
-	journal_header = (journal_header_t*)
-			ospfs_block(ospfs_super->os_firstjournalb + JOURNAL_HEADER_POS);
-	journal_header->execute_type = JOURNAL_WRITE;
-
-	return 0;
-}
-
 // ospfs_write
 //	Linux calls this function to write data to a file.
 //	It is the file_operations.write callback.
@@ -1632,8 +1687,8 @@ restart_write_journal(journal_header_t *header, uint32_t *blocknos,
 //   where you cannot read past the end of the file, it is OK to write past
 //   the end of the file; this should simply change the file's size.
 //
-//   EXERCISE: Complete this function.
-
+// This function is not completely atomic if the write size is too large.
+// If the write size is less than 256 blocks, it should be atomic.
 static ssize_t
 ospfs_write(struct file *filp, const char __user *buffer, size_t count, 
 	loff_t *f_pos)
@@ -1754,8 +1809,7 @@ ospfs_write(struct file *filp, const char __user *buffer, size_t count,
 //	      name    -- name to search for
 //	      namelen -- length of 'name'.  (If -1, then use strlen(name).)
 //
-//	We have written this function for you.
-
+// This function does not use the journal, since it only reads
 static ospfs_direntry_t *
 find_direntry(ospfs_inode_t *dir_oi, const char *name, int namelen)
 {
@@ -1773,7 +1827,17 @@ find_direntry(ospfs_inode_t *dir_oi, const char *name, int namelen)
 }
 
 // Returns blockno offset of directory where the  blank direntry spot was found
-
+// find_blank_direntry(dir_oi, offset, inode_num)
+//
+// Inputs:  dir_oi  -- the OSP inode for the directory
+//          offset -- the pointer to the integer that will be the offset in the
+//                    block number returned where the direntry is
+//          inode_num -- the inode number of the directory we are affecting
+//
+// This function is to find the next blank dir entry in a given directory
+// It is a helper function for the following operations. If it cannot find
+// any blank entires, it will change the size of the directory to accomodate
+// so this could potentially write to the journal
 static int
 find_blank_direntry(ospfs_inode_t *dir_oi, uint32_t *offset, ino_t inode_num) {
 	
@@ -1847,8 +1911,9 @@ find_blank_direntry(ospfs_inode_t *dir_oi, uint32_t *offset, ino_t inode_num) {
 //               -ENOSPC       if the disk is full & the file can't be created;
 //               -EIO          on I/O error.
 //
-//   EXERCISE: Complete this function.
-
+// This hardlinks one file to another. It is an atomic operation if there is enough
+// space in the directory, or two operations if we need to increase the directory
+// size (see above)
 static int
 ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dentry) {
 	/* EXERCISE: Your code here. */
@@ -1951,15 +2016,9 @@ ospfs_link(struct dentry *src_dentry, struct inode *dir, struct dentry *dst_dent
 //               -ENOSPC       if the disk is full & the file can't be created;
 //               -EIO          on I/O error.
 //
-//   We have provided strictly less skeleton code for this function than for
-//   the others.  Here's a brief outline of what you need to do:
-//   1. Check for the -EEXIST error and find an empty directory entry using the
-//	helper functions above.
-//   2. Find an empty inode.  Set the 'entry_ino' variable to its inode number.
-//   3. Initialize the directory entry and inode.
-//
-//   EXERCISE: Complete this function.
-
+// This creates a new file in the given directory. It is an atomic operation
+// if there is enough space in the directory, or two operations if we need
+// to increase the directory size (see above)
 static int
 ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidata *nd)
 {
@@ -2075,8 +2134,9 @@ ospfs_create(struct inode *dir, struct dentry *dentry, int mode, struct nameidat
 //               -ENOSPC       if the disk is full & the file can't be created;
 //               -EIO          on I/O error.
 //
-//   EXERCISE: Complete this function.
-
+// This creates a new symlink in the given directory. It is an atomic operation
+// if there is enough space in the directory, or two operations if we need
+// to increase the directory size (see above)
 static int
 ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 {
@@ -2207,6 +2267,8 @@ ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 }
 
 
+
+
 // ospfs_follow_link(dentry, nd)
 //   Linux calls this function to follow a symbolic link.
 //   It is the ospfs_symlink_inode_ops.follow_link callback.
@@ -2214,12 +2276,7 @@ ospfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 //   Inputs: dentry -- the symbolic link's directory entry
 //           nd     -- to be filled in with the symbolic link's destination
 //
-//   Exercise: Expand this function to handle conditional symlinks.  Conditional
-//   symlinks will always be created by users in the following form
-//     root?/path/1:/path/2.
-//   (hint: Should the given form be changed in any way to make this method
-//   easier?  With which character do most functions expect C strings to end?)
-
+// This does not require the journal, since it only reads from the directory
 static void *
 ospfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
